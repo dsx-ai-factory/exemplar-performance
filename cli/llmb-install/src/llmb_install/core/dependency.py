@@ -479,7 +479,6 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
     _cleanup_invalid_git_repo(cache_path, is_bare=True, description="cache repository")
 
     git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
-    git_clone_timeout = 600  # 10 minutes
 
     # Ensure repo is in cache
     if not os.path.exists(cache_path):
@@ -493,11 +492,7 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
                 capture_output=True,
                 text=True,
                 env=git_env,
-                timeout=git_clone_timeout,
             )
-        except subprocess.TimeoutExpired:
-            logger.error(f"Timed out cloning {repo_url} after {git_clone_timeout}s")
-            raise
         except subprocess.CalledProcessError as e:
             e.add_note(f"Failed to cache {repo_url}")
             raise
@@ -515,11 +510,7 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
                     capture_output=True,
                     text=True,
                     env=git_env,
-                    timeout=git_clone_timeout,
                 )
-            except subprocess.TimeoutExpired:
-                logger.error(f"Timed out fetching {repo_url} after {git_clone_timeout}s")
-                raise
             except subprocess.CalledProcessError as e:
                 e.add_note(f"Failed to update cache for {name} for required commit {commit}")
                 raise
@@ -571,7 +562,6 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
                     capture_output=True,
                     text=True,
                     env=git_env,
-                    timeout=git_clone_timeout,
                 )
 
                 # Update default branch tracking to use origin instead of cache

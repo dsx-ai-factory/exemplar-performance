@@ -337,6 +337,59 @@ class TestSubmitAllTaskGeneration:
         # bf16 exact_scales: True, should be exactly the provided scales
         assert bf16_scales == {256, 512}
 
+    @pytest.mark.parametrize(
+        ("model_config", "expected_proxy_output"),
+        [
+            (
+                {
+                    "model_size": "15b",
+                    "dtypes": {
+                        "bf16": {"scales": [128, 256, 512]},
+                        "fp8": {"scales": [128, 256, 512], "proxy_scales": [4, 8]},
+                        "nvfp4": {"scales": [128, 256, 512]},
+                    },
+                },
+                ("Proxy scales by dtype:", "fp8: 4, 8"),
+            ),
+            (
+                {
+                    "model_size": "15b",
+                    "dtypes": ["bf16", "fp8"],
+                    "scales": [128, 256, 512],
+                    "proxy_scales": [4, 8],
+                },
+                ("Proxy scales: 4, 8",),
+            ),
+        ],
+        ids=["proxy-scales-on-one-dtype", "model-level-proxy-scales"],
+    )
+    def test_list_mode_displays_proxy_scales(self, model_config, expected_proxy_output, caplog):
+        workloads = {
+            "pretrain_nemotron4": {
+                "metadata": {
+                    "run": {
+                        "gpu_configs": {
+                            "h100": {
+                                "model_configs": [model_config],
+                            }
+                        }
+                    }
+                },
+                "dir": "/fake/nemotron4",
+                "workload": "nemotron4",
+                "workload_type": "pretrain",
+            }
+        }
+        cluster_config = _build_cluster_config(installed=["pretrain_nemotron4"])
+
+        from llmb_run.workload_validator import print_avail_workloads
+
+        caplog.clear()
+        caplog.set_level("INFO", logger="llmb_run.workload_validator")
+        print_avail_workloads(workloads, cluster_config, cluster_gpu_type="h100", verbose=True)
+        for expected_line in expected_proxy_output:
+            assert expected_line in caplog.text
+
     def test_list_mode_handles_mapping(self, monkeypatch, capsys, caplog):
         """Ensure list mode aggregates dtypes/scales correctly with mapping form."""
         workloads = {
