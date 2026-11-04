@@ -1,3 +1,11 @@
+## [v26.10.02] - 2026-11-04
+
+### Fixed
+
+- `install.sh` failed on macOS when it had to create its own virtual environment (no active venv and no existing `llmb_venv`), because macOS `realpath` rejects a path that doesn't exist yet. It now creates the venv on macOS, and Linux behavior is unchanged. Only impacts k8s.
+- `llmb-install`: removed the hard-coded 10-minute git clone/fetch timeout.
+- `llmb-run list` hid proxy scales when only some dtypes defined them, e.g. DeepSeek-V3 fp8 on GB300, B300 and H100.
+
 ## [v26.10.01] - 2026-10-23
 
 ### Fixed

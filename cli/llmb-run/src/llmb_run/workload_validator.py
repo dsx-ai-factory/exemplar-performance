@@ -384,14 +384,6 @@ def print_avail_workloads(workloads, cluster_config, cluster_gpu_type=None, verb
                                 logger.info(f"    Scales: {scales_str} (exact matches only)")
                             else:
                                 logger.info(f"    Scales: {scales_str}")
-
-                        # Show proxy scales if available and consistent across dtypes
-                        if len(unique_proxy_scales) == 1:
-                            common_proxy_scales_tuple = next(iter(unique_proxy_scales))
-                            common_proxy_scales = sorted(common_proxy_scales_tuple, key=int)
-                            if common_proxy_scales:
-                                proxy_scales_str = ', '.join(map(str, common_proxy_scales))
-                                logger.info(f"    Proxy scales: {proxy_scales_str}")
                     else:
                         # Split per dtype for clarity
                         logger.info("    Scales by dtype:")
@@ -402,14 +394,16 @@ def print_avail_workloads(workloads, cluster_config, cluster_gpu_type=None, verb
                             exact_suffix = " (exact)" if per_exact.get(dt, False) else ""
                             logger.info(f"      {dt}: {', '.join(map(str, scales_for_dt))}{exact_suffix}")
 
-                        # Show proxy scales per dtype if any exist
-                        any_proxy_scales = any(per_proxy_scales.get(dt, set()) for dt in dtype_list)
-                        if any_proxy_scales:
-                            logger.info("    Proxy scales by dtype:")
-                            for dt in dtype_list:
-                                proxy_scales_for_dt = sorted(per_proxy_scales.get(dt, set()), key=int)
-                                if proxy_scales_for_dt:
-                                    logger.info(f"      {dt}: {', '.join(map(str, proxy_scales_for_dt))}")
+                    if len(unique_proxy_scales) == 1:
+                        common_proxy_scales = sorted(next(iter(unique_proxy_scales)))
+                        if common_proxy_scales:
+                            logger.info(f"    Proxy scales: {', '.join(map(str, common_proxy_scales))}")
+                    else:
+                        logger.info("    Proxy scales by dtype:")
+                        for dt in dtype_list:
+                            proxy_scales_for_dt = sorted(per_proxy_scales.get(dt, set()))
+                            if proxy_scales_for_dt:
+                                logger.info(f"      {dt}: {', '.join(map(str, proxy_scales_for_dt))}")
                 else:
                     logger.info("    Data types: None specified")
                 if len(details['gpu_types']) > 1 or not cluster_gpu_type:

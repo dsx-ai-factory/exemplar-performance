@@ -319,7 +319,9 @@ setup_environment() {
 # Create venv with uv (can specify Python version)
 create_venv_with_uv() {
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    VENV_DIR="$(realpath "$SCRIPT_DIR/../llmb_venv")"
+    # llmb_venv may not exist yet, and BSD realpath (macOS) fails on a missing path.
+    VENV_DIR="$(realpath "$SCRIPT_DIR/..")/llmb_venv"
+    if [[ -e $VENV_DIR || -L $VENV_DIR ]]; then VENV_DIR="$(realpath "$VENV_DIR")"; fi
 
     echo "Creating virtual environment with uv..."
     local -a python_pref=()
