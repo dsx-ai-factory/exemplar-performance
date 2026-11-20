@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.75"
 description = "Replay recorded tool-side workloads and measure their CPU and memory demand."
 license = "Apache-2.0"
-repository = "https://github.com/NVIDIA/exemplar-performance"
+repository = "https://github.com/dsx-ai-factory/exemplar-performance"
 
 [[bin]]
 name = "tasktrace"

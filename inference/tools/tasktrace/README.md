@@ -88,7 +88,7 @@ Linux, [`uv`](https://docs.astral.sh/uv/), and Rust and Cargo 1.75 or newer. It
 does not require Docker or privileged profiling.
 
 ```bash
-git clone https://github.com/NVIDIA/exemplar-performance.git
+git clone https://github.com/dsx-ai-factory/exemplar-performance.git
 cd exemplar-performance/inference/tools/tasktrace
 
 uv run tasktrace --help

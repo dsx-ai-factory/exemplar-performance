@@ -79,7 +79,7 @@ TaskTrace-capture is a benchmark harness that orchestrates concurrent agent runs
 ## Quick Start
 
 ```bash
-git clone https://github.com/NVIDIA/exemplar-performance.git
+git clone https://github.com/dsx-ai-factory/exemplar-performance.git
 cd exemplar-performance/inference/tools/tasktrace-capture
 uv sync
 ```

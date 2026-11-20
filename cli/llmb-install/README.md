@@ -532,7 +532,7 @@ This project uses `uv` for dependency management and `tox` for multi-environment
   ```bash
   uv run --extra dev pytest
   ```
-- **Full Matrix (Multiple Python versions)**:
+- **Full Matrix (Multiple Python versions)**: Requires `tox.ini`.
   ```bash
   # Requires tox and tox-uv
   uv tool install tox --with tox-uv

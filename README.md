@@ -1,5 +1,7 @@
 # Exemplar Performance
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Performance Recipes are ready-to-use templates for evaluating the performance of specific AI use cases across hardware and software combinations. These containerized recipes allow users to quickly set up and run a standardized benchmarking methodology in their own environment, designed to produce consistent and comparable results across platforms.
 
 These Performance Recipes support performance characterization:
@@ -10,6 +12,23 @@ These Performance Recipes support performance characterization:
 Each recipe maps to one workload and can be run at various cluster scales and precisions. These workloads are tested against NVIDIA Reference Architectures to establish baselines for comparison. The resulting performance metrics are collected from production environments and are subject to real-world variability.
 
 For validation guidance, see the [Exemplar Training Guide](Exemplar_training_validation.md) and the [Exemplar Inference Guide](Exemplar_inference_validation.md), which lists available recipes by chip and scheduler.
+
+## How It Fits Together
+
+For recipes managed by `llmb-install` and `llmb-run`, the installer reads recipe metadata, prepares dependencies, and writes cluster configuration. `llmb-run` uses that configuration and the selected launcher backend to submit jobs to Slurm or Kubernetes. Workloads produce logs and performance results for validation.
+
+```mermaid
+flowchart LR
+    A[Recipe metadata] --> B[llmb-install]
+    B --> C[Installed recipes]
+    C --> D[llmb-run]
+    E[Cluster configuration] --> D
+    B --> E
+    D --> F[Scheduler and workload containers]
+    F --> G[Logs and performance results]
+```
+
+Exemplar supplies repeatable workload recipes around tools such as Megatron-Bridge, TensorRT-LLM, and SGLang. Those frameworks execute the model workload. Exemplar adds setup, launch configuration, and validation guidance for supported systems.
 
 ## Prerequisites
 
@@ -59,7 +78,7 @@ Allocate more storage if you enable profiling, keep many profiled runs, or insta
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/NVIDIA/exemplar-performance.git
+   git clone https://github.com/dsx-ai-factory/exemplar-performance.git
    cd exemplar-performance
    ```
 
@@ -624,7 +643,7 @@ export NCCL_P2P_NET_CHUNKSIZE=2097152
 
 # Release Notes
 
-For the latest updates, improvements, and breaking changes, see the [CHANGELOG](CHANGELOG).
+For the latest updates, improvements, and breaking changes, see the [CHANGELOG](CHANGELOG). See [Releases and Support](RELEASE.md) for versioning and release preparation.
 
 # FAQ
 
@@ -707,6 +726,8 @@ NCCL_IB_QPS_PER_CONNECTION=4 llmb-run submit -w <workload> -s <model-size> --dty
 The `pretrain_llama3.1` workload is the user-facing recipe for 70B and 405B. Internally, the 70B size reuses the existing Megatron-Bridge `llama3` config instead of duplicating it under a separate `llama3.1` name. As a result, setup output for 70B may show `Meta-Llama-3-*`, and experiment or log names may use the `pretrain_llama3` prefix. This is expected and does not mean the wrong workload or model size was selected.
 
 # Known Issues
+
+The following limitations and workarounds apply to the current release.
 
 ## 1. Multiple GPU Types on Single Cluster
 
@@ -814,6 +835,10 @@ llmb-run submit -w pretrain_llama3.1 -s 405b --dtype fp8 --scale 256 --env TORCH
 ```
 
 When running a launch script directly, set `LLMB_MBRIDGE_EXTRA_ARGS="-E TORCHINDUCTOR_COMPILE_THREADS=1"`.
+
+# Contributing
+
+See [Contributing](CONTRIBUTING.md) for how to propose changes, validate your work, and request review. All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 # Support
 

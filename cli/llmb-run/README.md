@@ -578,7 +578,7 @@ These methods require additional setup and are recommended only for advanced use
 uv tool install $LLMB_REPO/cli/llmb-run
 
 # Or from git
-# uv tool install git+https://github.com/NVIDIA/exemplar-performance#subdirectory=cli/llmb-run
+# uv tool install git+https://github.com/dsx-ai-factory/exemplar-performance#subdirectory=cli/llmb-run
 ```
 
 ### Option 2: Install as a Package (pip)
@@ -635,9 +635,9 @@ This project uses `uv` for dependency management and `tox` for multi-environment
 ### Environment Setup
 
 1. **Install uv**: [Follow official instructions](https://docs.astral.sh/uv/getting-started/installation/).
-2. **Sync environment**: Creates a virtualenv and installs dependencies from `uv.lock`.
+2. **Sync environment**: Creates a virtualenv and installs runtime plus development dependencies from `uv.lock`.
    ```bash
-   uv sync
+   uv sync --extra dev
    ```
 
 ### Managing Dependencies
@@ -653,9 +653,9 @@ This project uses `uv` for dependency management and `tox` for multi-environment
 
 - **Quick (Current Python)**:
   ```bash
-  uv run pytest
+  uv run --extra dev pytest
   ```
-- **Full Matrix (Multiple Python versions)**:
+- **Full Matrix (Multiple Python versions)**: Requires `tox.ini`.
   ```bash
   # Requires tox and tox-uv
   uv tool install tox --with tox-uv
