@@ -60,6 +60,8 @@ address, posting via an official social media account, or acting as an appointed
 representative at an online or offline event. Representation of a project may be
 further defined and clarified by project maintainers.
 
+Conduct outside project spaces is out of scope when the person is not representing the project or its community.
+
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
@@ -68,6 +70,8 @@ investigated and will result in a response that is deemed necessary and appropri
 to the circumstances. The project team is obligated to maintain confidentiality with
 regard to the reporter of an incident. Further details of specific enforcement policies
 may be posted separately.
+
+We aim to acknowledge reports within 3 business days. If the review needs more time, we will provide a status update and the next expected update date.
 
 Project maintainers who do not follow or enforce the Code of Conduct in good
 faith may face temporary or permanent repercussions as determined by other

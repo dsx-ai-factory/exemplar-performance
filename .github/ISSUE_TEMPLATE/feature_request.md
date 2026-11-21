@@ -20,4 +20,4 @@ A clear and concise description of any alternative solutions or features you've 
 Add any other context, code examples, or references to existing implementations about the feature request here.
 
 -----
-By submitting this issue, you agree to follow our [code of conduct](https://github.com/NVIDIA/exemplar-performance/blob/main/CODE_OF_CONDUCT.md)
+By submitting this issue, you agree to follow our [code of conduct](https://github.com/dsx-ai-factory/exemplar-performance/blob/main/CODE_OF_CONDUCT.md)

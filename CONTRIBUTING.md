@@ -2,6 +2,50 @@
 
 Thank you for your interest in contributing to Exemplar Performance.
 
+Please follow our [Code of Conduct](CODE_OF_CONDUCT.md) when participating in issues, code reviews, and other project discussions.
+
+## Proposing a Change
+
+For a bug, include the workload, hardware, software versions, steps to reproduce, and expected and observed behavior. Remove credentials and sensitive information from logs before sharing them. Report security vulnerabilities using the [security policy](SECURITY.md), rather than opening a public issue.
+
+For a substantial feature or a change to benchmark methodology, open an issue to discuss the approach before starting implementation. Small documentation fixes can go directly to a pull request.
+
+## Preparing Your Change
+
+- Keep each change focused on one problem and explain why it is needed.
+- Follow the conventions in the files you edit and update the relevant documentation when behavior changes.
+- Use Conventional Commits format: `type: summary` or `type(scope): summary`. Common types include `feat`, `fix`, `docs`, `test`, and `chore`. For example, `docs: clarify installation prerequisites`.
+- Run the relevant checks for the component you changed. The [installer README](cli/llmb-install/README.md) and [launcher README](cli/llmb-run/README.md) describe those tools. Workload-specific READMEs describe recipe setup and usage.
+
+## Local CLI Checks
+
+From the repository root, use `uv` to run both CLI test suites with Python 3.12 and the committed lockfiles:
+
+```bash
+(cd cli/llmb-install && uv run --locked --python 3.12 --extra dev pytest tests/ ) &&
+  (cd cli/llmb-run && uv run --locked --python 3.12 --extra dev pytest tests/ )
+```
+
+This runs both public CLI test suites. Workload validation requires the hardware and scheduler described in the recipe README.
+
+## Adding Recipes or Backends
+
+For a new workload, follow the [Recipe Development Guide](cli/llmb-install/docs/recipe_guide.md) and add metadata, a launch script, and a README alongside similar recipes. For a new launcher backend, implement `JobLauncher` and register it in `create_launcher` in [job_launcher.py](cli/llmb-run/src/llmb_run/job_launcher.py). Add mocked submission tests under `cli/llmb-run/tests/` and document its configuration.
+
+## AI-Assisted Contributions
+
+AI-assisted contributions are welcome. Contributors are responsible for reviewing and validating the output for correctness, security, and license compliance.
+
+## Issue Priority
+
+Maintainers prioritize issues based on severity, user impact, and available capacity. To request reprioritization, add affected workloads and impact to the issue.
+
+## Submitting and Reviewing Changes
+
+Open a pull request with a description of the problem, the change, and how you validated it. Link the related issue, if any, and include the exact check commands and their results so reviewers can reproduce your validation. For internal GitLab development, provide the same information in a merge request.
+
+Maintainers review changes for correctness, reproducibility, security, and consistency with the existing recipes and tools. Maintainers aim to provide initial feedback within a week. Follow up in the request if needed. Address feedback in the same request and summarize any new validation after making changes.
+
 ## Signing Off Your Work
 
 - We require that all contributors "sign-off" on their commits. This certifies that the contribution

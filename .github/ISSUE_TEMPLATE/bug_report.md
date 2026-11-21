@@ -28,4 +28,4 @@ A clear and concise description of what you expected to happen.
 Add any other context about the problem here.
 
 -----
-By submitting this issue, you agree to follow our [code of conduct](https://github.com/NVIDIA/exemplar-performance/blob/main/CODE_OF_CONDUCT.md).
+By submitting this issue, you agree to follow our [code of conduct](https://github.com/dsx-ai-factory/exemplar-performance/blob/main/CODE_OF_CONDUCT.md).

@@ -34,6 +34,10 @@ report, validate the issue and its severity, coordinate remediation and testing,
 and publish a security bulletin when appropriate under NVIDIA's coordinated
 vulnerability disclosure process.
 
+### Response and Remediation Expectations
+
+Exemplar follows [NVIDIA PSIRT policies](https://www.nvidia.com/en-us/security/psirt-policies/) for vulnerability handling, coordination with reporters, and remediation.
+
 ## Security Architecture & Context
 
 The Exemplar Performance Recipes provide containerized recipes,
@@ -52,7 +56,7 @@ The principal executable components include:
   containers, dependencies, mounts, and resource requirements used for each
   benchmark.
 - The inference Helm chart under
-  `alternative_recipes/helm-charts/inference/llm-benchmarks`, which can deploy
+  `inference/tools/single_node_helm/llm-benchmark-chart`, which can deploy
   model servers and benchmark clients on Kubernetes.
 - Diagnostic utilities such as the system-information recipe, which collect
   host, accelerator, scheduler, container-runtime, and network configuration.

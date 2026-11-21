@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Documentation or question
+description: Report missing or incorrect documentation, or ask a usage question.
+title: "[DOC] "
+labels: [needs-triage, doc]
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Relevant documentation or component
+      description: Link the page or identify the workload or tool.
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: Documentation request or question
+      description: Explain what is unclear, what you expected, and any suggested improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: What have you checked?
+      description: Include documentation searched or steps taken to verify the issue. Remove sensitive details.
+  - type: markdown
+    attributes:
+      value: >-
+        By submitting, you agree to follow our
+        [Code of Conduct](https://github.com/dsx-ai-factory/exemplar-performance/blob/main/CODE_OF_CONDUCT.md).
+        Report vulnerabilities through [SECURITY.md](https://github.com/dsx-ai-factory/exemplar-performance/blob/main/SECURITY.md).
