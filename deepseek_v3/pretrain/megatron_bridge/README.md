@@ -2,6 +2,18 @@
 
 This recipe contains information and scripts to produce performance results for the DeepSeek V3 pre-training workload. The scripts help perform environment setup and launch benchmark jobs. Configurations use weak scaling methodology (global batch size scales proportionally with GPU count).
 
+## VR NVL72
+
+| Precision      | GPUs | SeqLen | Layers | TP  | PP  | CP  | EP  | DP  | VP  | MBS | GBS  | GA  |
+| -------------- | :--: | :----: | :----: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :--: | :-: |
+| NVFP4/FP8/BF16 | 128  |  4096  |   61   |  1  |  4  |  1  | 32  | 32  |  4  |  1  | 2048 | 64  |
+| NVFP4          | 256  |  4096  |   61   |  1  |  8  |  1  | 32  | 32  |  8  |  2  | 4096 | 64  |
+| FP8            | 256  |  4096  |   61   |  1  |  8  |  1  | 32  | 32  |  8  |  1  | 4096 | 128 |
+| BF16           | 256  |  4096  |   61   |  1  |  4  |  1  | 64  | 64  |  4  |  1  | 4096 | 64  |
+| NVFP4          | 512  |  4096  |   61   |  1  |  8  |  1  | 32  | 64  |  8  |  2  | 8192 | 64  |
+| FP8            | 512  |  4096  |   61   |  1  |  8  |  1  | 32  | 64  |  8  |  1  | 8192 | 128 |
+| BF16           | 512  |  4096  |   61   |  1  |  4  |  1  | 64  | 128 |  4  |  1  | 8192 | 64  |
+
 ## GB300
 
 | Precision | GPUs | SeqLen | Layers | TP  | PP  | CP  | EP  | DP  | VP  | MBS | GBS  | GA  |
@@ -165,6 +177,9 @@ llmb-run submit -w pretrain_deepseek-v3 --dtype bf16 --scale 256
 # Example with different scale, and precision
 llmb-run submit -w pretrain_deepseek-v3 --dtype fp8 --scale 512
 
+
+# Run the reduced FP8 proxy on one 4-GPU VR NVL72 node
+llmb-run submit -w pretrain_deepseek-v3 --dtype fp8 --scale 4 --proxy
 ```
 
 ### Additional SLURM Parameters
@@ -218,6 +233,7 @@ JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [MODEL_SIZE=<size>] 
 
 - `JOB_TOTAL_GPUS`: Number of GPUs to use
 - `GPU_TYPE`: Type of GPU hardware
+  - `vr` - NVIDIA VR NVL72 (Vera Rubin) GPUs
   - `gb300` - NVIDIA GB300 GPUs
   - `gb200` - NVIDIA GB200 GPUs
   - `b300` - NVIDIA B300 GPUs
@@ -226,6 +242,7 @@ JOB_TOTAL_GPUS=<number> GPU_TYPE=<type> [DTYPE=<precision>] [MODEL_SIZE=<size>] 
 
 **Optional:**
 
+- `MBRIDGE_GPU_TYPE`: Megatron-Bridge GPU name for Vera Rubin (default: `vr200`, set automatically by `llmb-run`)
 - `DTYPE`: Precision format (default: `bf16`)
   - `bf16` - BFloat16 precision
   - `fp8` - FP8 precision
@@ -240,6 +257,12 @@ Train DeepSeek V3 with BF16 precision on 256 GB200 GPUs:
 
 ```shell
 JOB_TOTAL_GPUS=256 GPU_TYPE=gb200 ./launch.sh
+```
+
+Train DeepSeek V3 with BF16 precision on 128 VR NVL72 GPUs:
+
+```shell
+JOB_TOTAL_GPUS=128 GPU_TYPE=vr DTYPE=bf16 ./launch.sh
 ```
 
 Train on 1024 H100 GPUs:
@@ -350,11 +373,14 @@ Runs a reduced version of the full model on fewer GPUs while maintaining high mo
 
 Supported configurations:
 
+- **VR NVL72:** 4, 8, 16, 32, 64, and 72×N GPUs
 - **GB300:** 4, 8, 16, 32, 64, and 72×N GPUs
 - **GB200:** 4, 8, 16, 32, 64, and 72×N GPUs
 - **B300:** 8, 16, 32, and 64 GPUs
 - **B200:** 8, 16, 32, and 64 GPUs
 - **H100 (fp8 proxy):** 8, 16, 32, 64, 128, 256, and 512 GPUs
+
+On VR NVL72 the proxy uses 16 layers (3 dense, 13 MoE) with 4 experts per expert-parallel rank at every scale. Expert parallelism equals the GPU count up to 64 GPUs (256 experts at 64), is 72 on multiples of 72 (288 experts) and is 64 at other scales above 64, with the remaining GPUs used for data parallelism.
 
 **Example:**
 

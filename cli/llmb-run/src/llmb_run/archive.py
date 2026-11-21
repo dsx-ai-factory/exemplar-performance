@@ -19,12 +19,11 @@ from llmb_run.run_config import load_llmb_version
 
 _ARCHIVE_PREFIX = "llmb-archive"
 
-# TODO(temporary): microbenchmark_nccl uses the old sbatch launcher which places
-# llmb-config and slurm output at the workload root instead of inside experiments/.
-# Remove this constant and its usage in build_archive_file_list once the recipe
-# aligns with the standard layout.
+# TODO(temporary): 26.10.xx NCCL used the legacy sbatch launcher, which wrote these files to the workload root.
+# Remove _NCCL_WORKLOAD_NAME, _NCCL_TOP_LEVEL_PATTERNS and their usage once 26.10.xx is EOL.
 _NCCL_WORKLOAD_NAME = "microbenchmark_nccl"
 _NCCL_TOP_LEVEL_PATTERNS = ("llmb-config_*.yaml", "slurm-*.out")
+
 _ARCHIVE_EXCLUDED_PATTERNS = (
     "*.nsys-rep",
     "*_trace.json",
@@ -68,7 +67,7 @@ def build_archive_file_list(llmb_install: pathlib.Path) -> list[tuple[pathlib.Pa
         if not workload_dir.is_dir():
             continue
 
-        # TODO(temporary): remove with _NCCL_WORKLOAD_NAME / _NCCL_TOP_LEVEL_PATTERNS.
+        # TODO(temporary): remove legacy sbatch NCCL root-file handling once 26.10.xx is EOL.
         if workload_dir.name == _NCCL_WORKLOAD_NAME:
             for f in sorted(workload_dir.iterdir()):
                 if f.is_file() and any(fnmatch.fnmatch(f.name, p) for p in _NCCL_TOP_LEVEL_PATTERNS):

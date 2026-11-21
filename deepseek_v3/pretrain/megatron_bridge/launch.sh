@@ -22,11 +22,7 @@ GPU_TYPE=${GPU_TYPE,,}
 DTYPE=${DTYPE:-bf16}
 DTYPE=${DTYPE,,}
 
-if [[ $GPU_TYPE == "h100" ]]; then
-    FW_VERSION=26.06.01
-else
-    FW_VERSION=26.08.01
-fi
+mbridge_gpu_type=$GPU_TYPE
 
 if [[ $DTYPE == "fp8" ]]; then
     if [[ $GPU_TYPE == "h100" ]]; then
@@ -37,6 +33,16 @@ if [[ $DTYPE == "fp8" ]]; then
     COMPUTE_TYPE=${DTYPE}_${FP8_RECIPE}
 else
     COMPUTE_TYPE=${DTYPE}
+fi
+
+if [[ $GPU_TYPE == "vr" ]]; then
+    export FW_VERSION=26.10.01
+    # llmb-run supplies the Megatron-Bridge GPU name. Direct invocations default to vr200.
+    mbridge_gpu_type=${MBRIDGE_GPU_TYPE:-vr200}
+elif [[ $GPU_TYPE == "h100" ]]; then
+    FW_VERSION=26.06.01
+else
+    FW_VERSION=26.08.01
 fi
 
 export IMAGE=${RUN_CONF_IMAGE:-$LLMB_INSTALL/images/nvidia+nemo+$FW_VERSION.sqsh}
@@ -62,6 +68,7 @@ CPU_PERF_PROXY=${CPU_PERF_PROXY,,}
 DISABLE_CG=${DISABLE_CG:-false}
 DISABLE_CG=${DISABLE_CG,,}
 MAX_STEPS=${MAX_STEPS:-50}
+
 if [[ $IS_PROXY_WORKLOAD == true ]]; then
     if [[ $GPU_TYPE == "h100" ]]; then
         TIME_LIMIT=${TIME_LIMIT:-"01:45:00"}
@@ -119,6 +126,10 @@ if [[ $PROFILE_ENABLED == "true" ]]; then
     if [[ $GPU_METRICS_ENABLED == true ]]; then
         CONFIG_OVERRIDES+=" --profiling_gpu_metrics "
     fi
+    if [[ $GPU_TYPE == "vr" ]]; then
+        CONFIG_OVERRIDES+=" -E LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib/python3.12/dist-packages/torch/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+        CONFIG_OVERRIDES+=" -E NSYS_CONFIG_DIRECTIVES=CuptiUseRawGpuTimestamps=false"
+    fi
 fi
 
 if [[ $PYTORCH_PROFILE_ENABLED == "true" ]]; then
@@ -131,16 +142,24 @@ fi
 
 CONFIG_OVERRIDES+=" --enable_pct_binding $ENABLE_PCT_BINDING "
 
-if [[ $GPU_TYPE == "gb300" ]] || [[ $GPU_TYPE == "gb200" ]]; then
+# The 26.10 VR fp8_mx and nvfp4 recipes set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, which makes the
+# fused grouped-MLP backward request a deterministic cuDNN dGLU kernel that only exists
+# for SM100 ("deterministic dprob is implemented only for the SM100 kernel without dbias").
+# The launcher value wins over recipe env_vars (bootstrap.py applies those with setdefault).
+if [[ $GPU_TYPE == "vr" ]] && [[ $COMPUTE_TYPE == "fp8_mx" || $COMPUTE_TYPE == "nvfp4" ]]; then
+    CONFIG_OVERRIDES+=" -E NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 "
+fi
+
+if [[ $GPU_TYPE == "vr" ]] || [[ $GPU_TYPE == "gb300" ]] || [[ $GPU_TYPE == "gb200" ]]; then
     GPUS_PER_NODE=4
 elif [[ $GPU_TYPE == "b300" ]] || [[ $GPU_TYPE == "b200" ]] || [[ $GPU_TYPE == "h100" ]]; then
     GPUS_PER_NODE=8
 else
-    echo "Error: Unsupported GPU_TYPE '$GPU_TYPE'. Expected one of: gb300, gb200, b300, b200, h100." >&2
+    echo "Error: Unsupported GPU_TYPE '$GPU_TYPE'. Expected one of: vr, gb300, gb200, b300, b200, h100." >&2
     exit 1
 fi
 
-if [[ $GPU_TYPE == "gb300" ]] && [[ $JOB_TOTAL_GPUS -eq 128 ]]; then
+if [[ $GPU_TYPE == "vr" || $GPU_TYPE == "gb300" ]] && [[ $JOB_TOTAL_GPUS -eq 128 ]]; then
     CONFIG_OVERRIDES+=" -pp 4 "
     CONFIG_OVERRIDES+=" -vp 4 "
     CONFIG_OVERRIDES+=" -ep 32 "
@@ -175,7 +194,21 @@ if [[ $IS_PROXY_WORKLOAD == true ]]; then
         vp=None
         mb=1
         num_layers=31
-        if [[ $GPU_TYPE == "gb300" || $GPU_TYPE == "gb200" ]]; then
+        if [[ $GPU_TYPE == "vr" ]]; then
+            # 16 layers (3 dense + 13 MoE) with 4 experts per rank at every scale, matching the
+            # experts per rank of the full-scale configs. EP spans the
+            # job up to 64 GPUs (256 experts at 64), is fixed at 72 on multiples of 72 (288
+            # experts), and is capped at 64 elsewhere; extra GPUs become data parallel.
+            num_layers=16
+            if ((JOB_TOTAL_GPUS % 72 == 0)); then
+                ep=72
+            elif ((JOB_TOTAL_GPUS > 64)); then
+                ep=64
+            else
+                ep=$JOB_TOTAL_GPUS
+            fi
+            num_moe_experts=$((ep * 4))
+        elif [[ $GPU_TYPE == "gb300" || $GPU_TYPE == "gb200" ]]; then
             if ((JOB_TOTAL_GPUS % 72 == 0)); then
                 ep=72
                 num_moe_experts=144
@@ -206,7 +239,8 @@ if [[ $IS_PROXY_WORKLOAD == true ]]; then
                 num_moe_experts=$((JOB_TOTAL_GPUS * 2))
             fi
         fi
-        if [[ $GPU_TYPE == "gb300" || $GPU_TYPE == "b300" ]]; then
+        # The 4-GPU VR proxy keeps mb=1 to avoid a Transformer Engine assertion.
+        if [[ $GPU_TYPE == "gb300" || $GPU_TYPE == "b300" ]] || { [[ $GPU_TYPE == "vr" ]] && [[ $JOB_TOTAL_GPUS -ne 4 ]]; }; then
             mb=2
         elif [[ $GPU_TYPE == "h100" ]] && [[ $JOB_TOTAL_GPUS -lt 64 ]]; then
             mb=2
@@ -221,10 +255,10 @@ if [[ $IS_PROXY_WORKLOAD == true ]]; then
     elif [[ $CPU_PERF_PROXY == true ]] && [[ $GPU_TYPE != "h100" ]]; then # CPU proxy workloads
         if [[ $JOB_TOTAL_GPUS -eq $GPUS_PER_NODE ]]; then
             CONFIG_OVERRIDES+=" -ep $GPUS_PER_NODE "
-        elif [[ $JOB_TOTAL_GPUS -eq 64 ]] && { [[ $GPU_TYPE == "gb200" ]] || [[ $GPU_TYPE == "gb300" ]]; }; then
+        elif [[ $JOB_TOTAL_GPUS -eq 64 ]] && { [[ $GPU_TYPE == "vr" ]] || [[ $GPU_TYPE == "gb200" ]] || [[ $GPU_TYPE == "gb300" ]]; }; then
             CONFIG_OVERRIDES+=" -ep 64 "
         else
-            echo "Error: CPU proxy workloads are supported only for a single node (gb300/gb200/b300/b200) or 64 GPUs (gb200/gb300)."
+            echo "Error: CPU proxy workloads are supported only for a single node (vr/gb300/gb200/b300/b200) or 64 GPUs (vr/gb300/gb200)."
             exit 1
         fi
         CONFIG_OVERRIDES+=" -tp 1 "
@@ -265,7 +299,7 @@ pushd $LLMB_WORKLOAD/Megatron-Bridge
 python3 scripts/performance/setup_experiment.py \
     --container_image $IMAGE \
     --compute_dtype $COMPUTE_TYPE \
-    --gpu $GPU_TYPE \
+    --gpu "$mbridge_gpu_type" \
     --num_gpus $JOB_TOTAL_GPUS \
     --gpus_per_node $GPUS_PER_NODE \
     --offline \

@@ -12,6 +12,16 @@ from llmb_run.tasks import WorkloadTask
 from llmb_run.workload_validator import ValidationErrorType
 
 
+@pytest.mark.usefixtures('mock_dependencies')
+def test_dump_env_flag_remains_visible(runner):
+    from llmb_run.main import app
+
+    result = runner.invoke(app, ['submit', '--help'])
+
+    assert result.exit_code == 0, result.output
+    assert '--dump-env' in result.output
+
+
 def test_version_flag(runner, tmp_path, monkeypatch):
     """Without a configured install, --version prints only the launcher line."""
     from llmb_run.main import app

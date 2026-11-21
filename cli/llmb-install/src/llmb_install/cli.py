@@ -137,6 +137,12 @@ Examples:
 
 def main() -> None:
     """Main entry point for the LLMB installer."""
+    # Run before Installer imports threaded/native libraries. This also covers
+    # the console script, install.sh, and python -m llmb_install.
+    from llmb_install.utils.memory import configure_allocator
+
+    configure_allocator()
+
     from llmb_install.core.installer import Installer
 
     args = parse_arguments()

@@ -30,9 +30,7 @@ uv tool install $LLMB_REPO/cli/llmb-install
 
 #### Option 2: Install as a Package (pip)
 
-It is recommended to run the installer in a virtual environment with Python 3.12.x.
-The top-level installer can run from an existing uv, venv, or conda environment,
-but newly-created recipe environments use `uv`.
+It is recommended to run the installer in a virtual environment with Python 3.12.x. The top-level installer can run from an existing uv, venv, or conda environment, but newly-created recipe environments use `uv`.
 
 ```bash
 # Install installer dependencies
@@ -52,7 +50,7 @@ The installer will guide you through an interactive setup process covering:
 - SLURM cluster configuration
 - Node architecture (x86_64/aarch64)
 - Recipe environment setup with uv
-- Installation method (local/SLURM)
+- Image download method (local/SLURM)
 - Workload selection
 
 ### Installing Additional Workloads
@@ -120,14 +118,10 @@ Express mode uses saved system configuration (SLURM settings, GPU type, image fo
 
 ### Environment Setup
 
-Fresh recipe environments are created with `uv`. The bootstrap script still
-detects an already-active uv, venv, or conda environment for the top-level
-`llmb-install` and `llmb-run` tools, but the installer no longer prompts for a
-recipe environment manager.
+Fresh recipe environments are created with `uv`. The bootstrap script still detects an already-active uv, venv, or conda environment for the top-level `llmb-install` and `llmb-run` tools, but the installer no longer prompts for a recipe environment manager.
 
 - `uv` is installed automatically by `install.sh` if missing
-- Existing conda/venv recipe configs are still supported for resume, incremental,
-  and headless compatibility
+- Existing conda/venv recipe configs are still supported for resume, incremental, and headless compatibility
 
 ### Python Dependencies
 
@@ -208,19 +202,19 @@ export LLMB_BIN="${LLMB_BIN:-$LLMB_INSTALL/bin/$(uname -m)}"
 "$LLMB_BIN/uv" run ...
 ```
 
-### Installation Method
+### Image Download Method
 
-Which method to use to download the large container images and datasets. Workload specific setup and venv installation will always be on the current node.
+Which method to use to download the large container images. Venv installation runs on the current node; workload-specific setup tasks may submit their own SLURM jobs.
 
 - **Local**: Downloads run on current machine (requires enroot access)
 - **SLURM**: Downloads submitted as jobs (recommended for clusters)
   - **Note:** Currently this is sequential srun jobs.
-  - **Important:** SLURM installation method is not available when running the installer within a SLURM job
+  - **Important:** SLURM image download method is not available when running the installer within a SLURM job
 
 **SLURM Job Detection**: The installer automatically detects if it's running within a SLURM job (via `SLURM_JOB_ID` environment variable). When detected:
 
-- SLURM installation method is disabled (cannot submit jobs from within a job)
-- Automatically defaults to local installation method if enroot is available
+- SLURM image download method is disabled (cannot submit jobs from within a job)
+- Automatically defaults to local image download method if enroot is available
 - Exits with error if enroot is not available
 
 ## Common Issues and Solutions
@@ -237,7 +231,7 @@ You are running within a SLURM job, but enroot is not available on this system.
 **Solution**:
 
 - **Option 1**: Run the installer from a login node (outside SLURM job)
-- **Option 2**: Ensure enroot is available on compute nodes and use local installation method
+- **Option 2**: Ensure enroot is available on compute nodes and use local image download method
 
 ### Installation Process is Slow/Resource Intensive
 
@@ -249,7 +243,7 @@ You are running within a SLURM job, but enroot is not available on this system.
 
 - **Option 1**: Try running the installer again, perhaps during off-peak hours.
 - **Option 2**: Obtain an interactive shell on a dedicated CPU node and run the installer there. This offloads the resource usage from the login node.
-- **Option 3**: On hosts with ample memory, speed up HuggingFace downloads by raising `LLMB_HF_MAX_WORKERS` / `HF_XET_FIXED_DOWNLOAD_CONCURRENCY` (see [HuggingFace Downloads Killed / Out of Memory](#huggingface-downloads-killed--out-of-memory)).
+- **Option 3**: For slow Hugging Face downloads, check network and storage throughput. On a host with enough memory, try increasing `LLMB_HF_MAX_WORKERS` (see [HuggingFace Downloads Killed / Out of Memory](#huggingface-downloads-killed--out-of-memory)).
 
 ### Package Installation Resource Limit Errors
 
@@ -268,20 +262,19 @@ If the error continues, set all three values to `1`. For open-file errors, check
 
 As a last resort, set `LLMB_USE_PIP_FALLBACK=1` to use standard pip. Standard pip is typically significantly slower for LLMB installations, so prefer limiting uv concurrency first.
 
-### Enroot Not Available for Local Installation
+### Enroot Not Available for Local Image Downloads
 
 **Issue**: Installer automatically selects SLURM method when enroot is missing
 
 ```
-Note: enroot is not available on this system.
-Local installation requires enroot for container image downloading.
-Automatically selecting SLURM-based installation.
+Note: Enroot is not available on this system.
+Local image download method is not available. Using SLURM method.
 ```
 
 **Solution**:
 
-- **Option 1**: Install enroot on the current system to enable local installation
-- **Option 2**: Continue with SLURM installation method (recommended for clusters)
+- **Option 1**: Install enroot on the current system to enable local image downloads
+- **Option 2**: Continue with the SLURM image download method (recommended for clusters)
 - **Option 3**: Manually download container images using enroot on a different system
 
 ### Python Version Compatibility
@@ -314,6 +307,7 @@ WARNING: UV_CACHE_DIR is under /home: /home/user/.cache/uv
 ### SLURM Account/Partition Issues
 
 **Issue**: Account or partition not recognized
+
 **Solution**:
 
 - Verify with `squeue -u $USER` or `sacctmgr show associations user=$USER`
@@ -322,14 +316,16 @@ WARNING: UV_CACHE_DIR is under /home: /home/user/.cache/uv
 ### Network Access Issues
 
 **Issue**: Container downloads fail
+
 **Solution**:
 
 - Ensure login nodes have internet access and enroot OR
-- Use SLURM installation method to run downloads on nodes with access
+- Use the SLURM image download method to download images on nodes with access
 
 ### Insufficient Disk Space
 
 **Issue**: Downloads fail due to space constraints
+
 **Solution**:
 
 - Choose installation location with adequate space
@@ -338,18 +334,39 @@ WARNING: UV_CACHE_DIR is under /home: /home/user/.cache/uv
 
 ### HuggingFace Downloads Killed / Out of Memory
 
-**Issue**: Model or dataset downloads abort partway — either a Rust `memory allocation of N bytes failed` error, or the process is silently killed and drops back to the shell. This happens on hosts with a tight per-job or per-user memory limit (`ulimit -v`, or a cgroup `memory.max` such as a systemd login-slice), which `ulimit` alone may not reveal.
+**Issue**: A model or dataset download stops partway — a Rust `memory allocation of N bytes failed` error, a silent exit (code 137), or minutes with no progress.
 
-**Explanation**: HuggingFace's Xet downloader scales memory with the number of concurrent download streams. To stay under tight caps, the installer pins conservative defaults: `HF_XET_FIXED_DOWNLOAD_CONCURRENCY=1` (per-file streams) and 4 concurrent file downloads (~2.5 GB peak). Peak memory roughly scales with `files × per-file streams`.
+Free RAM on the node does not necessarily mean the installer can allocate more memory. Clusters can limit memory per user or job, and a virtual-memory limit (`ulimit -v`) also counts reserved address space that is not resident in RAM.
 
-**Solution**: The defaults work out of the box. On memory-rich hosts you can raise them for faster downloads (export before running the installer):
+The installer handles these limits in two ways:
 
-| Variable                            | Default | Effect                                                     |
-| ----------------------------------- | ------- | ---------------------------------------------------------- |
-| `LLMB_HF_MAX_WORKERS`               | `4`     | Number of files downloaded concurrently.                   |
-| `HF_XET_FIXED_DOWNLOAD_CONCURRENCY` | `1`     | Per-file Xet download streams (read directly by `hf-xet`). |
+- **Download buffers:** `hf-xet` 1.8.0 sizes buffers from host RAM and cgroup limits. The installer further caps automatic buffer sizes for finite process limits (`ulimit -v` / `ulimit -d`), leaving already-smaller settings unchanged. Adaptive transfer streams remain enabled.
+- **Allocator reservations:** On Linux/glibc hosts with a process limit of 8 GiB or less, the installer requests an arena limit of two at startup. This reduces virtual-memory reservations without reducing file concurrency. Larger or unlimited hosts retain allocator defaults, and executed subprocesses such as Git are not retuned.
 
-Requires `hf-xet >= 1.3.0` (installed automatically). If a host's memory limit is below ~2.5 GB, the download may still be killed — run the installer on a node with more memory.
+These adjustments reduce the risk of allocation failures; they do not bound total process memory. Threads, temporary allocations, and other processes sharing the host's memory allowance can still exhaust available resources.
+
+If downloads fail:
+
+1. **Remove old tuning overrides** — unset any Xet buffer settings from earlier troubleshooting, then restart the installer to use automatic settings.
+2. **Download fewer files at once** — try `LLMB_HF_MAX_WORKERS=4 ./install.sh`, or `2` if needed.
+3. **Check your limits** — run `ulimit -v` and `ulimit -d`. Ask your administrator about restrictive limits, or use a node with more memory. Only raise limits if site policy permits it.
+4. **Collect diagnostics** — run `./install.sh --verbose` (or `llmb-install --verbose`) and keep the output if you need support. For `express`, place `--verbose` before the subcommand.
+
+**Advanced troubleshooting (Linux/glibc):** If large downloads still abort under a tight virtual-memory limit, try `MALLOC_ARENA_MAX=2 ./install.sh`. This applies allocator tuning before Python starts, covering startup customizations that may run before the installer's own setup. Existing explicit Xet buffer and allocator settings are respected and can bypass automatic protections.
+
+### Tuning Hugging Face Download Speed
+
+Downloads use up to **eight files at a time** by default. Xet also adapts its transfer-stream concurrency automatically; the installer no longer forces single-stream transfers. `LLMB_HF_MAX_WORKERS` controls the file count, not the transfer streams.
+
+On a suitably provisioned host, try a higher file count, for example:
+
+```bash
+LLMB_HF_MAX_WORKERS=16 ./install.sh
+```
+
+More concurrent files do not always mean faster downloads and can increase memory use. Lower the value if memory is tight. Set overrides before starting the installer; it selects settings once per process.
+
+Normal output shows the selected number of files downloaded at once. `--verbose` adds the startup allocator result and, when a process memory limit causes buffer caps, one line showing the detected limit and resulting Xet buffer values.
 
 ## Command Line Reference
 

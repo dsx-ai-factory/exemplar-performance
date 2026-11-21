@@ -4,12 +4,35 @@
 """Unit tests for HuggingFace download/verify workflow."""
 
 import os
+import resource
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from llmb_install.downloads import huggingface as hf
+
+
+@pytest.fixture(autouse=True)
+def isolated_download_settings():
+    # Each test represents a fresh installer process, independent of the test host
+    # and of any settings selected by earlier downloads in this test session.
+    with (
+        patch.object(hf, "_download_settings", None),
+        patch.object(hf, "_download_settings_announced", False),
+        patch.object(resource, "getrlimit", return_value=(resource.RLIM_INFINITY, resource.RLIM_INFINITY)),
+        patch.dict(os.environ),
+    ):
+        for name in list(os.environ):
+            if name.startswith(("HF_XET_", "HF_HUB_", "LLMB_HF_")):
+                os.environ.pop(name)
+        yield
+
 
 REPO_ID = "meta-llama/Meta-Llama-3-70B"
 NEMOTRON_REPO_ID = "nvidia/Nemotron-4-340B-Base"
@@ -98,6 +121,22 @@ class TestHuggingFaceDownloadPlan(unittest.TestCase):
         self.assertIsNone(repo.revision)
         self.assertEqual(repo.target, "workload")
         self.assertEqual(repo.name, "model-name")
+
+    def test_repo_entry_explicit_fields(self):
+        workloads = _workloads_with_downloads(
+            {
+                "huggingface": {
+                    "repos": [{"repo_id": "org/data", "repo_type": "dataset", "revision": "abc123", "name": "dataset"}]
+                }
+            }
+        )
+
+        (repo,) = hf.build_hf_download_plan(workloads, [WORKLOAD_KEY]).repos
+
+        self.assertEqual(repo.repo_type, "dataset")
+        self.assertEqual(repo.revision, "abc123")
+        self.assertEqual(repo.target, "workload")
+        self.assertEqual(repo.name, "dataset")
 
     def test_repo_entry_requires_repo_type(self):
         workloads = _workloads_with_downloads({"huggingface": {"repos": [{"repo_id": "org/model-name"}]}})
@@ -418,59 +457,365 @@ class TestHuggingFaceVerifyPhase(unittest.TestCase):
         mock_auto_config.from_pretrained.assert_not_called()
 
 
-class TestXetConcurrencyDefault(unittest.TestCase):
-    """set_hf_environment pins hf_xet per-file download concurrency by default."""
+class TestXetConcurrencyNotPinned(unittest.TestCase):
+    """Adaptive Xet streams stay enabled unless the user explicitly pins them."""
 
     _VAR = "HF_XET_FIXED_DOWNLOAD_CONCURRENCY"
 
-    def setUp(self):
-        self._saved = os.environ.pop(self._VAR, None)
-
-    def tearDown(self):
-        os.environ.pop(self._VAR, None)
-        if self._saved is not None:
-            os.environ[self._VAR] = self._saved
-
-    def test_pins_concurrency_to_one_by_default(self):
+    def test_does_not_pin_stream_concurrency_by_default(self):
         with tempfile.TemporaryDirectory() as cache_dir:
             hf.set_hf_environment(cache_dir)
-        self.assertEqual(os.environ.get(self._VAR), "1")
+        self.assertIsNone(os.environ.get(self._VAR))
 
-    def test_does_not_override_explicit_user_value(self):
-        os.environ[self._VAR] = "4"
-        with tempfile.TemporaryDirectory() as cache_dir:
-            hf.set_hf_environment(cache_dir)
-        self.assertEqual(os.environ.get(self._VAR), "4")
-
-
-class TestHfMaxWorkers(unittest.TestCase):
-    """_hf_max_workers default and LLMB_HF_MAX_WORKERS override handling."""
-
-    _VAR = "LLMB_HF_MAX_WORKERS"
-
-    def setUp(self):
-        self._saved = os.environ.pop(self._VAR, None)
-
-    def tearDown(self):
-        os.environ.pop(self._VAR, None)
-        if self._saved is not None:
-            os.environ[self._VAR] = self._saved
-
-    def test_default_is_four(self):
-        self.assertEqual(hf._hf_max_workers(), hf._DEFAULT_HF_MAX_WORKERS)
-        self.assertEqual(hf._hf_max_workers(), 4)
-
-    def test_valid_override_is_used(self):
+    def test_leaves_user_override_untouched(self):
         os.environ[self._VAR] = "8"
+        with tempfile.TemporaryDirectory() as cache_dir:
+            hf.set_hf_environment(cache_dir)
+        self.assertEqual(os.environ.get(self._VAR), "8")
+
+
+class TestAddressSpaceLimit(unittest.TestCase):
+    def _limit(self, address_space, data, hard=resource.RLIM_INFINITY):
+        limits = {
+            resource.RLIMIT_AS: (address_space, hard),
+            resource.RLIMIT_DATA: (data, hard),
+        }
+        with patch.object(resource, "getrlimit", side_effect=lambda res: limits[res]):
+            return hf._address_space_limit()
+
+    def test_unlimited(self):
+        self.assertIsNone(self._limit(resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
+    def test_address_space_limit(self):
+        self.assertEqual(self._limit(8 * 1024**3, resource.RLIM_INFINITY), 8 * 1024**3)
+
+    def test_data_limit(self):
+        self.assertEqual(self._limit(resource.RLIM_INFINITY, 8 * 1024**3), 8 * 1024**3)
+
+    def test_tighter_limit_wins(self):
+        self.assertEqual(self._limit(16 * 1024**3, 8 * 1024**3), 8 * 1024**3)
+
+    def test_soft_limit_is_used(self):
+        self.assertEqual(self._limit(8 * 1024**3, 16 * 1024**3, hard=32 * 1024**3), 8 * 1024**3)
+
+    def test_zero_is_a_finite_limit(self):
+        self.assertEqual(self._limit(0, resource.RLIM_INFINITY), 0)
+
+
+class TestHfDownloadSettings(unittest.TestCase):
+    """Cap Xet's settings without duplicating its host/cgroup memory detection."""
+
+    _GIB = 1024**3
+
+    @staticmethod
+    def _buffers(base, per_file, ceiling):
+        return {
+            "reconstruction.download_buffer_size": base,
+            "reconstruction.download_buffer_perfile_size": per_file,
+            "reconstruction.download_buffer_limit": ceiling,
+        }
+
+    def setUp(self):
+        # Representative 64 GiB-visible / 8 GiB-process-limit host.
+        self.derived = self._buffers(4 * self._GIB, self._GIB, 16 * self._GIB)
+        self.caps = self._buffers(self._GIB // 2, self._GIB // 8, 2 * self._GIB)
+        self.effective = dict(self.caps)
+        self.configs = []
+        config_patcher = patch("hf_xet.XetConfig", side_effect=self._config)
+        self.config_constructor = config_patcher.start()
+        self.addCleanup(config_patcher.stop)
+        limit_patcher = patch.object(resource, "getrlimit", return_value=(8 * self._GIB, resource.RLIM_INFINITY))
+        self.getrlimit = limit_patcher.start()
+        self.addCleanup(limit_patcher.stop)
+
+    @staticmethod
+    def _env_name(key):
+        return "HF_XET_" + key.upper().replace(".", "_")
+
+    def _config(self):
+        # Supply only the initial and post-capping values needed by production.
+        # Xet's own environment parsing is covered by the real-session test below.
+        values = self.derived if not self.configs else self.effective
+        self.configs.append(values)
+        return values
+
+    def _resolve(self):
+        self.configs = []
+        hf.set_hf_environment("/test/hf-cache")
+        return hf._get_download_settings()
+
+    def _assert_caps_in_environment(self):
+        for key, value in self.caps.items():
+            self.assertEqual(os.environ[self._env_name(key)], str(value))
+
+    def _assert_capped(self):
+        settings = self._resolve()
+        self.assertEqual(settings.max_workers, 8)
+        self.assertEqual(settings.buffer_sizes, tuple(self.caps.values()))
+        self._assert_caps_in_environment()
+
+    def _assert_unchanged(self):
+        settings = self._resolve()
+        self.assertEqual(settings.max_workers, 8)
+        self.assertIsNone(settings.buffer_sizes)
+        for key in self.derived:
+            self.assertNotIn(self._env_name(key), os.environ)
+
+    def test_64g_visible_8g_process_limit_caps_buffers_not_workers(self):
+        self._assert_capped()
+
+    def test_30g_visible_8g_process_limit_also_caps_buffers(self):
+        # A target below the whole AS limit can still leave too little headroom.
+        self.derived = self._buffers(1_872_000_000, 464_000_000, 7_496_000_000)
+        self._assert_capped()
+
+    def test_9g_visible_8g_process_limit_caps_only_oversized_values(self):
+        self.derived = self._buffers(600_000_000, 128_000_000, 2_408_000_000)
+        expected = dict(self.caps)
+        expected["reconstruction.download_buffer_perfile_size"] = 128_000_000
+        self.effective = dict(expected)
+        settings = self._resolve()
+        self.assertIsNotNone(settings.buffer_sizes)
+        for key, value in expected.items():
+            if key == "reconstruction.download_buffer_perfile_size":
+                self.assertNotIn(self._env_name(key), os.environ)
+            else:
+                self.assertEqual(os.environ[self._env_name(key)], str(value))
+
+    def test_smaller_cgroup_buffers_are_never_increased(self):
+        self.derived = self._buffers(264_000_000, 64_000_000, 1_072_000_000)
+        self._assert_unchanged()
+
+    def test_upstream_process_aware_buffers_need_no_overrides(self):
+        self.derived = dict(self.caps)
+        self._assert_unchanged()
+        self.config_constructor.assert_called_once()
+
+    def test_unlimited_host_keeps_defaults_without_probing_xet(self):
+        self.getrlimit.return_value = (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+        self._assert_unchanged()
+        self.config_constructor.assert_not_called()
+
+    def test_matching_large_process_limit_keeps_defaults(self):
+        self.getrlimit.return_value = (64 * self._GIB, resource.RLIM_INFINITY)
+        self._assert_unchanged()
+
+    def test_zero_limit_is_not_treated_as_unlimited(self):
+        self.getrlimit.return_value = (0, resource.RLIM_INFINITY)
+        self.effective = self._buffers(0, 0, 0)
+        self.assertIsNotNone(self._resolve().buffer_sizes)
+        for key in self.effective:
+            self.assertEqual(os.environ[self._env_name(key)], "0")
+
+    def test_fraction_caps_use_exact_bytes_without_rounding_up(self):
+        process_limit = 8 * self._GIB + 123
+        self.getrlimit.return_value = (process_limit, resource.RLIM_INFINITY)
+        expected = self._buffers(process_limit // 16, process_limit // 64, process_limit // 4)
+        self.effective = dict(expected)
+        self._resolve()
+        for key, value in expected.items():
+            self.assertEqual(os.environ[self._env_name(key)], str(value))
+
+    def test_each_buffer_is_capped_independently(self):
+        for key in self.derived:
+            with self.subTest(key=key), patch.object(hf, "_download_settings", None), patch.dict(os.environ):
+                self.derived = self._buffers(64_000_000, 16_000_000, 264_000_000)
+                self.derived[key] = self.caps[key] * 2
+                self.effective = dict(self.derived)
+                self.effective[key] = self.caps[key]
+                settings = self._resolve()
+                self.assertIsNotNone(settings.buffer_sizes)
+                set_names = {self._env_name(k) for k in self.derived if self._env_name(k) in os.environ}
+                self.assertEqual(set_names, {self._env_name(key)})
+                self.assertEqual(os.environ[self._env_name(key)], str(self.caps[key]))
+
+    def test_worker_overrides_do_not_change_buffer_caps(self):
+        for workers in (1, 4, 8, 64):
+            with self.subTest(workers=workers), patch.object(hf, "_download_settings", None), patch.dict(os.environ):
+                os.environ["LLMB_HF_MAX_WORKERS"] = str(workers)
+                settings = self._resolve()
+                self.assertEqual(settings.max_workers, workers)
+                self._assert_caps_in_environment()
+
+    def test_invalid_workers_use_eight_even_when_buffers_are_capped(self):
+        for raw in ("not-an-int", "0", "-1"):
+            with self.subTest(raw=raw), patch.object(hf, "_download_settings", None), patch.dict(os.environ):
+                os.environ["LLMB_HF_MAX_WORKERS"] = raw
+                with patch.object(hf.logger, "warning") as warning:
+                    self.assertEqual(self._resolve().max_workers, 8)
+                warning.assert_called_once()
+
+    def test_invalid_workers_use_eight_on_unlimited_host(self):
+        self.getrlimit.return_value = (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+        os.environ["LLMB_HF_MAX_WORKERS"] = "0"
+        self.assertEqual(self._resolve().max_workers, 8)
+
+    def test_explicit_per_buffer_values_are_preserved_above_or_below_caps(self):
+        for key, cap in self.caps.items():
+            for value in (cap // 2, cap * 2):
+                with (
+                    self.subTest(key=key, value=value),
+                    patch.object(hf, "_download_settings", None),
+                    patch.dict(os.environ),
+                ):
+                    name = self._env_name(key)
+                    os.environ[name] = str(value)
+                    self._resolve()
+                    self.assertEqual(os.environ[name], str(value))
+
+    def test_all_explicit_buffer_values_are_left_alone(self):
+        for key, value in self.derived.items():
+            os.environ[self._env_name(key)] = str(value)
+        settings = self._resolve()
+        self.assertIsNone(settings.buffer_sizes)
+        for key, value in self.derived.items():
+            self.assertEqual(os.environ[self._env_name(key)], str(value))
+
+    def test_disabled_xet_is_not_probed_or_capped(self):
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        settings = self._resolve()
+        self.assertEqual(settings.max_workers, 8)
+        self.assertIsNone(settings.buffer_sizes)
+        self.config_constructor.assert_not_called()
+        for key in self.derived:
+            self.assertNotIn(self._env_name(key), os.environ)
+
+    def test_cache_environment_precedes_config_inspection(self):
+        def config_after_cache_setup():
+            self.assertEqual(os.environ["HF_HOME"], "/test/hf-cache")
+            self.assertEqual(os.environ["HF_HUB_CACHE"], "/test/hf-cache/hub")
+            return self._config()
+
+        self.config_constructor.side_effect = config_after_cache_setup
+        with patch("builtins.print") as output:
+            self._resolve()
+        output.assert_not_called()
+
+    def test_settings_are_resolved_once_and_caps_are_retained(self):
+        settings = self._resolve()
+        env = {self._env_name(key): os.environ[self._env_name(key)] for key in self.caps}
+        os.environ["LLMB_HF_MAX_WORKERS"] = "64"
+        hf.set_hf_environment("/test/another-cache")
+        self.assertIs(hf._get_download_settings(), settings)
         self.assertEqual(hf._hf_max_workers(), 8)
+        self.assertEqual({name: os.environ[name] for name in env}, env)
+        self.assertEqual(self.getrlimit.call_count, 2)
+        self.assertEqual(self.config_constructor.call_count, 2)
 
-    def test_non_integer_override_falls_back_to_default(self):
-        os.environ[self._VAR] = "not-an-int"
-        self.assertEqual(hf._hf_max_workers(), 4)
+    def test_normal_announcement_is_one_line_printed_once(self):
+        self.getrlimit.return_value = (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+        self._resolve()
+        with patch("builtins.print") as output:
+            hf._announce_download_settings()
+            hf._announce_download_settings()
+        self.assertEqual(output.call_count, 1)
+        self.assertEqual(
+            output.call_args_list[0].args[0],
+            "HuggingFace downloads: up to 8 workers (adjust with LLMB_HF_MAX_WORKERS).",
+        )
+        self.assertIn("LLMB_HF_MAX_WORKERS", str(output.call_args_list))
 
-    def test_non_positive_override_falls_back_to_default(self):
-        os.environ[self._VAR] = "0"
-        self.assertEqual(hf._hf_max_workers(), 4)
+    def test_capped_announcement_is_concise_and_diagnostics_are_debug_only(self):
+        self._resolve()
+        with self.assertLogs(hf.logger, level="DEBUG") as diagnostics, patch("builtins.print") as output:
+            hf._announce_download_settings()
+            hf._announce_download_settings()
+        self.assertEqual(output.call_count, 1)
+        self.assertEqual(
+            output.call_args_list[0].args[0],
+            "HuggingFace downloads: up to 8 workers (adjust with LLMB_HF_MAX_WORKERS).",
+        )
+        user_output = str(output.call_args_list)
+        self.assertNotIn("MiB", user_output)
+        self.assertNotIn("GiB", user_output)
+        self.assertNotIn("Xet", user_output)
+        self.assertIn("LLMB_HF_MAX_WORKERS", user_output)
+        self.assertEqual(len(diagnostics.records), 1)
+        self.assertEqual(
+            diagnostics.records[0].getMessage(),
+            "HuggingFace downloads: detected process memory limit 8 GiB; "
+            "capped Xet buffers to shared=512 MiB, per-file=128 MiB, ceiling=2048 MiB.",
+        )
+        self.assertEqual(self.config_constructor.call_count, 2)  # Announcing never probes Xet again.
+
+    def test_info_level_does_not_emit_memory_diagnostics(self):
+        self._resolve()
+        with self.assertNoLogs(hf.logger, level="INFO"), patch("builtins.print") as output:
+            hf._announce_download_settings()
+        self.assertEqual(output.call_count, 1)
+        self.assertNotIn("MiB", str(output.call_args_list))
+
+    def test_announcement_reports_worker_override(self):
+        os.environ["LLMB_HF_MAX_WORKERS"] = "64"
+        self._resolve()
+        with patch("builtins.print") as output:
+            hf._announce_download_settings()
+        self.assertIn("up to 64 workers", output.call_args_list[0].args[0])
+
+    def test_cache_and_repo_downloads_share_one_decision_and_announcement(self):
+        repo = hf.HuggingFaceRepoSpec(
+            workload_key=WORKLOAD_KEY, repo_id="openai/gpt-oss-120b", repo_type="model", name="gpt-oss-120b"
+        )
+        with tempfile.TemporaryDirectory() as install_path:
+            cache_dir = os.path.join(install_path, ".cache", "huggingface")
+            with (
+                patch("huggingface_hub.snapshot_download", return_value=cache_dir) as snapshot,
+                patch("builtins.print") as output,
+            ):
+                hf.download_huggingface_cache_assets(_asset_specs(REPO_ID, "config"), cache_dir)
+                hf.download_huggingface_repos((repo,), install_path, cache_dir)
+        self.assertEqual(snapshot.call_count, 2)
+        self.assertEqual([call.kwargs["max_workers"] for call in snapshot.call_args_list], [8, 8])
+        announcements = [
+            call.args[0]
+            for call in output.call_args_list
+            if call.args and str(call.args[0]).startswith("HuggingFace downloads:")
+        ]
+        self.assertEqual(len(announcements), 1)
+        self.assertEqual(self.config_constructor.call_count, 2)
+        self.assertEqual(self.getrlimit.call_count, 2)
+
+
+class TestXetSessionBufferCaps(unittest.TestCase):
+    def test_actual_hub_session_receives_caps_without_network_or_allocator_tuning(self):
+        # A fresh interpreter avoids the mocks/imports/cached session in other tests.
+        # Only simulate the limit reading: no real AS cap or large data allocation.
+        code = textwrap.dedent(r"""
+            import os
+            import re
+            import tempfile
+            from llmb_install.downloads import huggingface as hf
+
+            hf._address_space_limit = lambda: 8 * 1024**3
+            # Force a known large baseline even on a small test host. This flag
+            # remains set, but its non-explicit buffer values must be capped.
+            os.environ["HF_XET_DISABLE_MEMORY_DERIVED_DOWNLOAD_BUFFERS"] = "1"
+            with tempfile.TemporaryDirectory() as cache:
+                hf.set_hf_environment(cache)
+                from huggingface_hub.utils._xet import get_xet_session, abort_xet_session
+
+                session = get_xet_session()
+                actual = dict(re.findall(r"(reconstruction[.]download_buffer_\w+)=(\d+)", repr(session)))
+                assert actual == {
+                    "reconstruction.download_buffer_size": str(512 * 1024**2),
+                    "reconstruction.download_buffer_perfile_size": str(128 * 1024**2),
+                    "reconstruction.download_buffer_limit": str(2 * 1024**3),
+                }, actual
+                assert "client.ac_max_download_concurrency=64" in repr(session)
+                assert hf._hf_max_workers() == 8
+                assert "HF_XET_FIXED_DOWNLOAD_CONCURRENCY" not in os.environ
+                abort_xet_session()
+            """)
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith(("HF_XET_", "HF_HUB_", "LLMB_HF_")) and name != "MALLOC_ARENA_MAX"
+        }
+        env["PYTHONPATH"] = str(Path(hf.__file__).resolve().parents[2])
+        env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        env["TOKIO_WORKER_THREADS"] = "2"  # Keep this startup-only test small on large CI hosts.
+        result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

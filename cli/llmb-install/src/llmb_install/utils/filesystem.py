@@ -4,6 +4,7 @@
 
 """File system utilities for LLMB installer."""
 
+import json
 import os
 import shutil
 import stat
@@ -11,6 +12,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from llmb_install.utils.git import describe_checkout
 
 
 def find_llmb_repo_root() -> str:
@@ -261,6 +264,13 @@ def copy_repository_working_files(src_dir: str, dest_dir: str) -> None:
                 copied_files += 1
             except Exception as e:
                 raise Exception(f"Failed to copy exemplar.yaml: {e}") from e
+
+        # The copy has no .git, so this records the commit it was copied from.
+        try:
+            record = json.dumps(describe_checkout(str(src_path)), indent=2)
+            (dest_path / '.llmb_source.json').write_text(record + '\n')
+        except Exception as e:
+            print(f"Warning: Could not write .llmb_source.json: {e}")
 
         # Create sentinel file to mark successful completion - this is critical for validation
         sentinel_file = dest_path / '.llmb_repo_copy_complete'

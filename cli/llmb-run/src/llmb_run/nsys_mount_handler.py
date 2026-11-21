@@ -35,11 +35,8 @@ CONTAINER_NSYS_INSTALL_DIRS: Dict[str, str] = {
     'nvcr.io#nvidia/nemo:26.04.01': '/usr/local/cuda-13.1/NsightSystems-cli-2026.1.1/',
     'nvcr.io#nvidia/nemo:26.06.01': '/usr/local/cuda-13.2/NsightSystems-cli-2026.2.1',
     'nvcr.io#nvidia/nemo:26.08.01': '/opt/nvidia/nsight-systems-cli/2026.5.1',
-    # Internal Rubin bring-up images (VR NVL72, Grace/sbsa). Temporary:
-    # remove these entries once Rubin-capable public containers ship.
-    'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-08-30': '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2',
-    'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-09-02': '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2',
-    'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-09-09': '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2',
+    'nvcr.io#nvidia/nemo:26.10.00': '/usr/local/cuda-13.4/NsightSystems-cli-2026.5.1',
+    'nvcr.io#nvidia/nemo:26.10.01': '/usr/local/cuda-13.4/NsightSystems-cli-2026.5.1',
 }
 
 # Container image to CUPTI library path lookup table
@@ -78,18 +75,6 @@ CONTAINER_CUPTI_PATHS: Dict[Tuple[str, str], str] = {
         'nvcr.io#nvidia/nemo:26.02.01',
         'aarch64',
     ): '/usr/local/cuda-13.0/NsightSystems-cli-2026.1.0/target-linux-sbsa-armv8/libcupti-sbsa.so.13.0',
-    (
-        'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-08-30',
-        'aarch64',
-    ): '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2/target-linux-sbsa-armv8/libcupti-sbsa.so.13.0',
-    (
-        'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-09-02',
-        'aarch64',
-    ): '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2/target-linux-sbsa-armv8/libcupti-sbsa.so.13.5',
-    (
-        'nvcr.io#nvidian/nemo:rubin-devel-nightly-2026-09-09',
-        'aarch64',
-    ): '/usr/local/cuda-13.5/NsightSystems-cli-2026.5.2/target-linux-sbsa-armv8/libcupti-sbsa.so.13.0',
     # Add entries for other containers as needed
 }
 

@@ -2005,6 +2005,54 @@ def test_nvcre_launch_activates_the_workload_venv(tmp_path, cluster_config_facto
     assert "LLMB_PYTHON" not in env  # the POC-era interpreter pin is gone
 
 
+def _nvcre_script_launch(tmp_path, cluster_config_factory, run_metadata):
+    """Run NVCreLauncher.launch for a venv-less (sbatch-style) workload; return the launch.sh call."""
+    from llmb_run.job_launcher import NVCreLauncher
+
+    config = cluster_config_factory(
+        {
+            "launcher": {"llmb_install": str(tmp_path / "llmb"), "gpu_type": "gb300"},
+            "execution_target": "kubernetes",
+            "kubernetes": {"namespace": "ns"},
+            "workloads": {"config": {}},
+        }
+    )
+    workloads = {
+        "microbenchmark_nccl": {
+            "dir": str(tmp_path),
+            "metadata": {"container": {"images": ["nvcr.io#nvidia/nemo:26.08.01"]}, "run": run_metadata},
+        }
+    }
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(argv=argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="stop here")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        NVCreLauncher(config, workloads).launch(WorkloadTask("microbenchmark_nccl", "nccl", "fp8", 8))
+    return captured
+
+
+@pytest.mark.parametrize("launcher_type", ["sbatch", "configured_sbatch"])
+def test_nvcre_launch_runs_script_workloads_without_a_venv(
+    tmp_path, cluster_config_factory, launcher_type, monkeypatch
+):
+    """Microbenchmarks have no venv; they get the same experiment dir and variables as on Slurm."""
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)  # the launcher copies the caller's environment
+    call = _nvcre_script_launch(
+        tmp_path, cluster_config_factory, {"launcher_type": launcher_type, "launch_script": "launch.sh"}
+    )
+    env = call["env"]
+
+    assert call["argv"] == ["./launch.sh"]
+    assert env["CLUSTER_TYPE"] == "kubernetes"
+    assert env["LLMB_WORKLOAD"] == str(tmp_path / "llmb" / "workloads" / "microbenchmark_nccl")
+    assert env["LLMB_EXPERIMENT_DIR"].startswith(env["LLMB_WORKLOAD"] + os.sep + "experiments" + os.sep)
+    assert env["GPUS_PER_NODE"] and env["LLMB_REPO"]
+    assert "VIRTUAL_ENV" not in env
+
+
 def test_completed_nvcre_job_is_cancelled_after_a_successful_pull(tmp_path, cluster_config_factory):
     import subprocess
 

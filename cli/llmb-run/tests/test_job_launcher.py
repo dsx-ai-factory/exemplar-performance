@@ -1071,34 +1071,89 @@ def test_srt_slurm_config_uses_gpu_type_fallback_without_gres(tmp_path):
     assert generated_config["use_gpus_per_node_directive"] is False
 
 
-def test_srt_slurm_launcher_rejects_scale_that_does_not_match_recipe(tmp_path):
+_PREFILL_DECODE_OVERLAID = (
+    "base:\n  resources:\n    gpus_per_node: 4\n    prefill_nodes: 1\n    decode_nodes: 9\noverride_validated: {}\n"
+)
+_SCHEMA_V2_OVERLAID = (
+    "base:\n"
+    "  schema: 2\n"
+    "  resources:\n    gpus_per_node: 4\n"
+    "  roles:\n    prefill:\n      nodes: 1\n    decode:\n      nodes: 2\n"
+    "override_wide:\n  roles:\n    decode:\n      nodes: 4\n"
+)
+
+
+@pytest.mark.parametrize(
+    "text, selector, gpus",
+    [
+        (_PREFILL_DECODE_OVERLAID, "override_validated", 40),
+        # a top-level TRT-LLM recipe
+        ("resources:\n  gpus_per_node: 4\n  prefill_nodes: 6\n  decode_nodes: 4\n", None, 40),
+        # schema 2: the nodes of each role, with a selector's role overrides applied
+        ("schema: 2\nresources:\n  gpus_per_node: 4\nroles:\n  agg:\n    nodes: 1\n    gpus: 4\n", None, 4),
+        (_SCHEMA_V2_OVERLAID, None, 12),
+        (_SCHEMA_V2_OVERLAID, "override_wide", 20),
+    ],
+)
+def test_srt_slurm_launcher_counts_recipe_gpus(tmp_path, text, selector, gpus):
     recipe = tmp_path / "recipe.yaml"
-    recipe.write_text(
-        "base:\n  resources:\n    gpus_per_node: 4\n    prefill_nodes: 1\n    decode_nodes: 9\noverride_validated: {}\n"
-    )
-
-    assert SrtSlurmLauncher._recipe_gpu_count(recipe, "override_validated") == 40
-    with pytest.raises(
-        ValueError,
-        match=r"recipe requests 40 GPUs, but LLMB --scale is 1.*--scale 40",
-    ):
-        SrtSlurmLauncher._validate_recipe_scale(recipe, "override_validated", 1)
+    recipe.write_text(text)
+    assert SrtSlurmLauncher._recipe_gpu_count(recipe, selector) == gpus
+    SrtSlurmLauncher._validate_recipe_scale(recipe, selector, gpus)
 
 
-def test_srt_slurm_launcher_counts_top_level_trtllm_recipe(tmp_path):
+@pytest.mark.parametrize(
+    "text, selector, error",
+    [
+        (_PREFILL_DECODE_OVERLAID, "override_validated", r"recipe requests 40 GPUs, but LLMB --scale is 1.*--scale 40"),
+        ("resources:\n  gpus_per_node: 4\n  nodes: 1\n", "override", "requires a recipe with a 'base' mapping"),
+        ("resources:\n  gpus_per_node: 0\n  nodes: 1\n", None, "resource 'gpus_per_node' must be a positive integer"),
+        (
+            "schema: 2\nresources:\n  gpus_per_node: 4\nroles:\n  agg:\n    gpus: 4\n",
+            None,
+            "role 'agg' must declare a positive integer 'nodes'",
+        ),
+    ],
+)
+def test_srt_slurm_launcher_rejects_recipe_topology_or_scale(tmp_path, text, selector, error):
     recipe = tmp_path / "recipe.yaml"
-    recipe.write_text("resources:\n  gpus_per_node: 4\n  prefill_nodes: 6\n  decode_nodes: 4\n")
+    recipe.write_text(text)
+    with pytest.raises(ValueError, match=error):
+        SrtSlurmLauncher._validate_recipe_scale(recipe, selector, 1)
 
-    assert SrtSlurmLauncher._recipe_gpu_count(recipe) == 40
-    SrtSlurmLauncher._validate_recipe_scale(recipe, None, 40)
 
+def test_srt_slurm_aliases_shared_downloads_for_this_gpu_type(tmp_path):
+    llmb_install = tmp_path / "install"
+    workload_dir = llmb_install / "workloads" / "inference_test"
+    shared = llmb_install / "datasets" / "shared-model"
+    image = llmb_install / "images" / "test-runtime.sqsh"
+    shared.mkdir(parents=True)
+    workload_dir.mkdir(parents=True)
+    image.parent.mkdir(parents=True)
+    image.touch()
+    metadata = {
+        "container": {"images": [{"url": "registry/test-runtime:1", "name": "test-runtime"}]},
+        "downloads": {
+            "huggingface": {
+                "repos": [
+                    {"target": "shared", "name": "shared-model", "when": {"gpu": ["gb300", "gb200"]}},
+                    {"target": "shared", "name": "h100-only", "when": {"gpu": ["h100"]}},
+                ]
+            }
+        },
+    }
 
-def test_srt_slurm_launcher_rejects_selector_for_top_level_recipe(tmp_path):
-    recipe = tmp_path / "recipe.yaml"
-    recipe.write_text("resources:\n  gpus_per_node: 4\n  nodes: 1\n")
+    model_paths, containers = SrtSlurmLauncher._artifact_aliases(metadata, llmb_install, workload_dir, "gb300")
 
-    with pytest.raises(ValueError, match="requires a recipe with a 'base' mapping"):
-        SrtSlurmLauncher._recipe_gpu_count(recipe, "override")
+    assert model_paths == {"shared-model": str(shared)}
+    assert containers == {"test-runtime": str(image)}
+    with pytest.raises(ValueError, match="declares no model aliases"):
+        SrtSlurmLauncher._artifact_aliases(
+            {**metadata, "downloads": {"huggingface": {"repos": metadata["downloads"]["huggingface"]["repos"][1:]}}},
+            llmb_install,
+            workload_dir,
+            "gb300",
+        )
 
 
 def test_create_launcher_unknown_type():

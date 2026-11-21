@@ -95,7 +95,7 @@ def prompt_image_download_method(
     express_mode: bool = False,
     allow_kubernetes: bool = False,
 ) -> Optional[str]:
-    """Prompt the user to select where image/dataset downloads run for Slurm installs.
+    """Prompt the user to select where container image downloads run for Slurm installs.
 
     Args:
         ui: UI interface for user interaction
@@ -109,12 +109,11 @@ def prompt_image_download_method(
     """
     ui.log("\nImage Download Method")
     ui.log("---------------------")
+    ui.log("Please select where container images should be downloaded.")
+    ui.log(" 'local': Images are downloaded on the current machine. Requires enroot.")
     ui.log(
-        "Please select how you would like to perform longer running tasks like container image fetching and dataset downloads."
-    )
-    ui.log(" 'local': Tasks will be run directly on the current machine. Requires enroot to be available.")
-    ui.log(
-        " 'slurm': Tasks will be submitted as SLURM jobs. This is recommended for clusters where interactive nodes may have limited resources or network access."
+        " 'slurm': Images are downloaded via SLURM jobs. Requires compute nodes with internet access and enroot. "
+        "Recommended when interactive nodes have limited resources or network access."
     )
 
     # Check if we're running within a SLURM job
@@ -124,18 +123,18 @@ def prompt_image_download_method(
 
     if running_in_slurm_job:
         ui.log("\nDetected: Running within a SLURM job (SLURM_JOB_ID found in environment).")
-        ui.log("SLURM installation method is not supported when running within a SLURM job.")
+        ui.log("SLURM image download method is not supported when running within a SLURM job.")
 
         if not enroot_available:
             ui.log("\nError: Cannot proceed with installation.")
             ui.log("You are running within a SLURM job, but enroot is not available on this system.")
-            ui.log("Local installation requires enroot for container image downloading.")
+            ui.log("The local image download method requires enroot.")
             ui.log("Please either:")
             ui.log("  1. Run the installer from outside a SLURM job, or")
             ui.log("  2. Ensure enroot is available on the compute nodes")
             raise SystemExit(1)
 
-        ui.log("Forcing local installation method.")
+        ui.log("Forcing local image download method.")
         return "local"
 
     # Determine available options
@@ -152,7 +151,7 @@ def prompt_image_download_method(
 
     if not enroot_available and not allow_kubernetes:
         ui.log("\nNote: Enroot is not available on this system.")
-        ui.log("Local installation is not available. Using SLURM method.")
+        ui.log("Local image download method is not available. Using SLURM method.")
         return "slurm"
 
     # Prompt for choice
@@ -164,16 +163,6 @@ def prompt_image_download_method(
     else:
         selected_default = None
 
-    selected = ui.prompt_select("Select installation method:", options, default=selected_default)
-
-    if selected is None:
-        return None
-
-    if selected == "slurm":
-        ui.log("\nNote: SLURM method will submit jobs for container downloads and other tasks.")
-        ui.log("Ensure that compute nodes have internet access and enroot available.")
-    else:
-        ui.log("\nNote: Local method will run tasks directly on this machine.")
-        ui.log("Ensure this machine has sufficient resources and network access.")
+    selected = ui.prompt_select("Select image download method:", options, default=selected_default)
 
     return selected

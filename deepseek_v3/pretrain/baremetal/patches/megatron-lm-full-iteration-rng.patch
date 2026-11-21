@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Megatron-LM commits b4d72b79 (#7348) and d6316eb4 (#7885), limited to full_cuda_graph.py and
+# tensor_parallel/random.py and rebased onto 9be4a574, whose imports in random.py differ.
+diff --git a/megatron/core/full_cuda_graph.py b/megatron/core/full_cuda_graph.py
+index 686b2db5f..95d1a82fa 100644
+--- a/megatron/core/full_cuda_graph.py
++++ b/megatron/core/full_cuda_graph.py
+@@ -7,7 +7,11 @@ import logging
+ 
+ import torch
+ 
+-from megatron.core.tensor_parallel.random import get_all_rng_states
++from megatron.core.tensor_parallel.random import (
++    cudagraph_needs_generator_registration,
++    get_all_rng_states,
++    prime_cuda_rng_states_for_graph_capture,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -219,8 +223,9 @@ class FullCudaGraphWrapper:
+             torch.distributed.barrier()
+             assert FullCudaGraphWrapper.cuda_graph[training_str] is None
+             FullCudaGraphWrapper.cuda_graph[training_str] = torch.cuda.CUDAGraph()
+-            for _, state in get_all_rng_states().items():
+-                FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
++            if cudagraph_needs_generator_registration():
++                for _, state in get_all_rng_states().items():
++                    FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
+             torch.cuda.synchronize()
+             capture_stream = get_shared_capture_stream()
+             with torch.cuda.graph(
+@@ -229,6 +234,8 @@ class FullCudaGraphWrapper:
+                 pool=get_graph_pool(self.use_single_mempool),
+                 capture_error_mode="thread_local",
+             ):
++                # Must precede all other captured work; see the helper's docstring.
++                prime_cuda_rng_states_for_graph_capture()
+                 FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                     *args, **kwargs
+                 )
+diff --git a/megatron/core/tensor_parallel/random.py b/megatron/core/tensor_parallel/random.py
+index 7915f045b..51d3b285c 100644
+--- a/megatron/core/tensor_parallel/random.py
++++ b/megatron/core/tensor_parallel/random.py
+@@ -26,7 +26,11 @@ from megatron.core.parallel_state import (
+     get_gtp_weight_remat_world_size,
+     get_tensor_model_parallel_rank,
+ )
+-from megatron.core.utils import is_te_min_version, safely_set_viewless_tensor_data
++from megatron.core.utils import (
++    is_te_min_version,
++    is_torch_min_version,
++    safely_set_viewless_tensor_data,
++)
+ 
+ # ---------------------------------------------------------------------------
+ # C++ extension: zero-copy storage sharing for CheckpointWithoutOutput
+@@ -443,6 +447,45 @@ def get_all_rng_states():
+         return {}
+ 
+ 
++def cudagraph_needs_generator_registration() -> bool:
++    """Whether generators must be registered with a `torch.cuda.CUDAGraph` before capture.
++
++    PyTorch >= 2.14 (pytorch/pytorch#176753) lazily registers every generator whose Philox
++    state is consumed during capture, and `CUDAGraph.register_generator_state()` became a
++    deprecated no-op that prints a warning on *every* call. Skip the explicit registration
++    there: it does nothing, and with one call per layer, per graph and per generator it floods
++    stderr (tens of thousands of lines per rank for dynamic inference with CUDA graphs).
++    """
++    return not is_torch_min_version("2.14.0a0")
++
++
++def prime_cuda_rng_states_for_graph_capture() -> None:
++    """Create each CUDA generator's capture state at the start of a graph capture.
++
++    Call as the first operation inside a `torch.cuda.graph` capture. PyTorch >= 2.14
++    (pytorch/pytorch#176753) creates this state lazily on the generator's first Philox use in
++    the capture and allocates it on the default stream. Mid-capture, that allocation makes the
++    caching allocator record and query events for blocks freed earlier in the capture; if a
++    block's recorded stream has since joined the capture (e.g. an NCCL stream after a pipeline
++    recv), the query raises cudaErrorCapturedEvent and invalidates the capture
++    (pytorch/pytorch#193982). Priming here, while nothing is pending, restores the pre-2.14
++    behavior of `capture_begin`. Each primed generator advances by one tiny draw per replay.
++    No-op outside a capture and on PyTorch < 2.14.
++    """
++    # TODO: Remove once the minimum supported PyTorch includes the upstream fix for lazy RNG
++    # capture-state allocation (pytorch/pytorch#193993 or its successor).
++    if cudagraph_needs_generator_registration() or not torch.cuda.is_current_stream_capturing():
++        return
++    scratch = torch.empty(1, device=torch.cuda.current_device())
++    generators = [torch.cuda.default_generators[scratch.device.index]]
++    if _CUDA_RNG_STATE_TRACKER_INITIALIZED:
++        generators.extend((get_all_rng_states() or {}).values())
++    for generator in generators:
++        # Graph-safe trackers hold generators; tensor states cannot be drawn from under capture.
++        if isinstance(generator, torch.Generator) and generator.device == scratch.device:
++            scratch.uniform_(generator=generator)
++
++
+ def model_parallel_cuda_manual_seed(
+     seed: int,
+     te_rng_tracker: bool = False,

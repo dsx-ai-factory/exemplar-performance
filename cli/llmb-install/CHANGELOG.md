@@ -2,15 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-This project uses [PEP 440](https://www.python.org/dev/peps/pep-0440/) versioning with semantic versioning semantics:
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).\
+This project uses [PEP 440](https://www.python.org/dev/peps/pep-0440/) versioning with semantic versioning semantics:\
 **MAJOR.MINOR.PATCH** for feature parity with [SemVer](https://semver.org/).
 
-## [1.19.0.post1] - 2026-11-03
+## [1.22.0] - 2026-11-16
+
+### Added
+
+- The repository copy (`$LLMB_INSTALL/llmb_repo`) records the commit it was copied from in `.llmb_source.json`: `git_commit`, `git_dirty` (a tracked file differs from HEAD) and `git_error` (why either is null). Dev mode (`-d`) makes no copy, so no record.
+
+## [1.21.0] - 2026-11-16
+
+### Changed
+
+- Updated Hugging Face downloads to `hf-xet` 1.8.0 and restored adaptive transfer concurrency, removing the fixed single-stream limit that slowed large model and dataset downloads.
+- Concurrent file downloads now default to eight instead of four. `LLMB_HF_MAX_WORKERS` remains available for tuning, and the selected file count is displayed once before downloads begin.
 
 ### Fixed
 
-- Backport of the 1.20.0 change: removed the hard-coded 10-minute git clone/fetch timeout.
+- Download buffer sizing now accounts for process memory limits (`ulimit -v` / `ulimit -d`) in addition to host and cgroup memory, reducing allocation failures on memory-limited login nodes.
+- Added early allocator tuning on tightly memory-limited Linux/glibc hosts to reduce virtual-memory overhead without lowering download concurrency. Explicit buffer and allocator settings remain respected.
+
+## [1.20.2] - 2026-11-05
+
+### Changed
+
+- Clarified that the image download method only applies to container images.
+- Configuration summaries now show the cluster type and only the settings that apply to it.
+
+## [1.20.1] - 2026-11-02
+
+### Fixed
+
+- `--record` and `express --list-workloads` no longer require Git LFS or run `git lfs install`. They still require it when a resumable installation is saved.
+
+## [1.20.0] - 2026-10-29
+
+### Added
+
+- Git clones, fetches, checkouts and submodule updates show a live progress bar (phase, elapsed time) on a terminal. In non-interactive output, status lines are printed for fetches and cache hits instead.
+
+### Fixed
+
+- Git clones and fetches no longer fail after a hard-coded 10-minute timeout on large repos or slow links.
 
 ## [1.19.0] - 2026-10-19
 
@@ -137,8 +172,7 @@ This project uses [PEP 440](https://www.python.org/dev/peps/pep-0440/) versionin
 
 ### Fixed
 
-- Setup task subprocesses now reliably inherit `PIP_CACHE_DIR` and `UV_CACHE_DIR` on every install path (incremental, headless, and edit-resume previously missed
-  them), so `uv`/`pip` no longer fall back to caching under the user's home directory.
+- Setup task subprocesses now reliably inherit `PIP_CACHE_DIR` and `UV_CACHE_DIR` on every install path (incremental, headless, and edit-resume previously missed them), so `uv`/`pip` no longer fall back to caching under the user's home directory.
 - Pressing Ctrl+C at the install method prompt now exits the installer instead of continuing to the next prompt.
 - Setup tasks now run from the installed copy of the repo (`$LLMB_INSTALL/llmb_repo/<workload>`) instead of the original git clone.
 - `sbatch` setup tasks now receive an explicit `--output` flag directing logs to `$LLMB_INSTALL/workloads/<workload>/`, overriding the SLURM default of writing to the submission directory.

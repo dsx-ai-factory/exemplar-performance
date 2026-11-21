@@ -900,6 +900,8 @@ def submit(
     Submit jobs using a unified interface. Supports explicit, discovery, and file-based modes.
     """
     app_ctx: AppContext = ctx.obj
+    # Always capture the environment for internal runs.
+    dump_env = dump_env or _internal_extensions_available()
 
     try:
         explicit_env_overrides = parse_cli_env_args(env_values)
@@ -1008,6 +1010,10 @@ def exemplar(
         # Generate exemplar tasks (includes preflight checks and strict install gating)
         # Pass CLI repeats (None if not provided); generate_exemplar_tasks will use YAML value if None
         task_list = generate_exemplar_tasks(app_ctx.workloads, app_ctx.cluster_config, repeats=repeats)
+
+        if _internal_extensions_available():
+            for task in task_list:
+                task.extra_workload_args = ("--dump_env",)
 
         if not task_list:
             logger.error("No exemplar tasks generated. Check your configuration and installed workloads.")

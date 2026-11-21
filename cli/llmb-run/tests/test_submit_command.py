@@ -185,7 +185,8 @@ class TestSubmitCommand:
         assert recorded_tasks[0].slurm_args is not None
         assert recorded_tasks[0].slurm_args.to_additional_slurm_params() == "exclusive;constraint=gpu"
 
-    def test_submit_explicit_mode_with_repeatable_env(self, runner):
+    @pytest.mark.parametrize('internal', [False, True])
+    def test_submit_explicit_mode_with_repeatable_env(self, runner, internal):
         """Repeatable --env values should propagate to task env and explicit-env intent."""
         from llmb_run.main import app
 
@@ -194,7 +195,10 @@ class TestSubmitCommand:
         def _fake_run_tests(_cfg, tasks, _workloads, **_kwargs):
             recorded_tasks.extend(tasks)
 
-        with patch('llmb_run.main.run_tests', _fake_run_tests):
+        with (
+            patch('llmb_run.main._internal_extensions_available', return_value=internal),
+            patch('llmb_run.main.run_tests', _fake_run_tests),
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -218,39 +222,33 @@ class TestSubmitCommand:
         assert len(recorded_tasks) == 1
         assert recorded_tasks[0].env_overrides == {"HF_TOKEN": "abc123", "NCCL_DEBUG": "INFO"}
         assert recorded_tasks[0].explicit_env_overrides == {"HF_TOKEN": "abc123", "NCCL_DEBUG": "INFO"}
-        assert recorded_tasks[0].extra_workload_args == ()
+        assert recorded_tasks[0].extra_workload_args == (('--dump_env',) if internal else ())
 
-    def test_submit_explicit_mode_with_dump_env(self, runner):
-        """--dump-env should propagate as an extra workload arg."""
+    @pytest.mark.parametrize('internal', [False, True])
+    @pytest.mark.parametrize('flag_count', [0, 1, 2])
+    @pytest.mark.parametrize('profile', [False, True])
+    def test_submit_explicit_mode_with_dump_env(self, runner, internal, flag_count, profile):
+        """Internal defaults and explicit flags should use the same argument once."""
         from llmb_run.main import app
 
-        recorded_tasks = []
-
-        def _fake_run_tests(_cfg, tasks, _workloads, **_kwargs):
-            recorded_tasks.extend(tasks)
-
-        with patch('llmb_run.main.run_tests', _fake_run_tests):
-            result = runner.invoke(
-                app,
-                [
-                    "submit",
-                    "-w",
-                    "training_foo",
-                    "-s",
-                    "7b",
-                    "--dtype",
-                    "fp16",
-                    "--scale",
-                    "8",
-                    "--dump-env",
-                ],
-            )
+        args = ['submit', '-w', 'training_foo', '-s', '7b', '--dtype', 'fp16', '--scale', '8']
+        args += ['--dump-env'] * flag_count
+        if profile:
+            args += ['--profile']
+        with (
+            patch('llmb_run.main._internal_extensions_available', return_value=internal),
+            patch('llmb_run.main.run_tests') as launch,
+        ):
+            result = runner.invoke(app, args)
 
         assert result.exit_code == 0, f"Output: {result.stdout}"
-        assert len(recorded_tasks) == 1
-        assert recorded_tasks[0].extra_workload_args == ("--dump_env",)
+        tasks = launch.call_args.args[1]
+        assert len(tasks) == 1
+        assert tasks[0].profile is profile
+        assert tasks[0].extra_workload_args == (('--dump_env',) if internal or flag_count else ())
 
-    def test_submit_explicit_mode_with_mbridge_args(self, runner, mock_workloads):
+    @pytest.mark.parametrize('internal', [False, True])
+    def test_submit_explicit_mode_with_mbridge_args(self, runner, mock_workloads, internal):
         """Repeatable --mbridge-arg values should preserve exact token order."""
         from llmb_run.main import app
 
@@ -260,7 +258,10 @@ class TestSubmitCommand:
         def _fake_run_tests(_cfg, tasks, _workloads, **_kwargs):
             recorded_tasks.extend(tasks)
 
-        with patch('llmb_run.main.run_tests', _fake_run_tests):
+        with (
+            patch('llmb_run.main._internal_extensions_available', return_value=internal),
+            patch('llmb_run.main.run_tests', _fake_run_tests),
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -281,7 +282,7 @@ class TestSubmitCommand:
         assert result.exit_code == 0, f"Output: {result.stdout}"
         assert len(recorded_tasks) == 1
         assert recorded_tasks[0].mbridge_args == ("--micro_batch_size=2", "model.hidden_size=4096")
-        assert recorded_tasks[0].extra_workload_args == ()
+        assert recorded_tasks[0].extra_workload_args == (('--dump_env',) if internal else ())
 
     def test_submit_warns_and_ignores_mbridge_args_for_other_launchers(self, runner, caplog):
         """MBridge arguments should not reach incompatible workload tasks."""

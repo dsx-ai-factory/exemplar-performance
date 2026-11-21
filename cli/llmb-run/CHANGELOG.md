@@ -2,8 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.27.0] - 2026-11-06
+
+### Added
+
+- Kubernetes (nvcre) clusters run `sbatch` and `configured_sbatch` workloads (the microbenchmarks) without a venv, with the same experiment directory and `LLMB_*` variables as on Slurm.
+
+## [1.26.0] - 2026-11-02
+
+### Changed
+
+- Make `--dump-env` the default for internal workloads.
+
+## [1.25.0] - 2026-10-27
+
+### Added
+
+- SRT-Slurm schema-2 recipes: the scale check sums the `nodes` of each role under `roles`, with a selector's role overrides applied.
+- `target: shared` Hugging Face downloads in SRT-Slurm recipes resolve to their single copy under `$LLMB_INSTALL/datasets`, skipping downloads whose `when.gpu` leaves out the GPU type.
 
 ## [1.24.1] - 2026-10-26
 
@@ -46,12 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Launchers export `LLMB_REPO` (the `llmb_repo` path from `cluster_config.yaml`), `LLMB_RECIPE_ROOT` (the recipe's directory within `LLMB_REPO`, where its `metadata.yaml` and launch script live), and `LLMB_WORKLOAD` (`$LLMB_INSTALL/workloads/<workload_key>`) to every job.
-
-## [1.21.1] - 2026-09-29
-
-### Added
-
-- NSys/CUPTI mount-table entries for internal `rubin-devel-nightly` bring-up containers.
 
 ## [1.21.0] - 2026-09-28
 

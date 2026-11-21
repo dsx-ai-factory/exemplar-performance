@@ -408,8 +408,7 @@ llmb-run exemplar
 
 #### Troubleshooting Missing Workloads
 
-If `llmb-run exemplar` fails due to missing workloads, do **not** use `llmb-install express`.
-Instead, verify your installed workloads and add missing ones:
+If `llmb-run exemplar` fails due to missing workloads, do **not** use `llmb-install express`. Instead, verify your installed workloads and add missing ones:
 
 ```bash
 cd $LLMB_INSTALL
@@ -564,6 +563,11 @@ See [example_llmb_config.yaml](example_llmb_config.yaml) for a complete example.
    - Check your Slurm account and partition settings in `cluster_config.yaml`
    - If your system does not support GRES, make sure `SBATCH_GPUS_PER_NODE` is not in your environment section
    - Re-run with verbose output to see detailed error messages, e.g. `llmb-run -v submit ...`
+
+7. **Debugging Megatron-Bridge Jobs**
+
+   - Add `--dump-env` to `llmb-run submit` to capture a rank-0 environment snapshot in a separate job log file. Compare snapshots to diagnose environment differences between runs.
+   - Common secret-like keys are redacted, but review snapshots before sharing them.
 
 ## Alternative Installation Methods
 

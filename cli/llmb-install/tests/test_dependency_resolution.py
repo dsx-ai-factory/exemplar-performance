@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for dependency resolution functionality in the installer."""
@@ -248,8 +248,9 @@ class TestCloneGitRepos:
     """Test git repository cloning functionality."""
 
     @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('llmb_install.core.dependency._run_git_with_progress')
     @patch('subprocess.run')
-    def test_clone_git_repos_success(self, mock_run, mock_uses_lfs):
+    def test_clone_git_repos_success(self, mock_run, mock_run_git, mock_uses_lfs):
         """Test successful git repository cloning."""
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout='')
         mock_uses_lfs.return_value = False  # Non-LFS repo
@@ -260,21 +261,22 @@ class TestCloneGitRepos:
             with patch('os.makedirs'):
                 clone_git_repos(git_deps, "/tmp/test", "/tmp/install")
 
-        # Should call: bare clone, clone from cache, remote setup, checkout (caching enabled)
-        assert mock_run.call_count == 4
+        # Mirror clone + checkout via the progress runner; clone from cache + remote setup via subprocess.run
+        assert mock_run_git.call_count == 2
+        assert mock_run.call_count == 2
 
+    @patch('llmb_install.core.dependency._run_git_with_progress')
     @patch('subprocess.run')
-    def test_clone_git_repos_already_exists(self, mock_run):
+    def test_clone_git_repos_already_exists(self, mock_run, mock_run_git):
         """Test git repository cloning when directory already exists."""
         # Set up mock responses for: git rev-parse (cache), cat-file (commit),
-        # git rev-parse (target), git remote (target), fetch cache, checkout
+        # git rev-parse (target), git remote (target), fetch cache
         mock_run.side_effect = [
             subprocess.CompletedProcess([], 0),  # git rev-parse for cache validation
             subprocess.CompletedProcess([], 0),  # git cat-file for commit existence
             subprocess.CompletedProcess([], 0),  # git rev-parse for target validation
             subprocess.CompletedProcess([], 0, stdout="origin\ncache\n"),  # git remote for target
             subprocess.CompletedProcess([], 0),  # git fetch cache
-            subprocess.CompletedProcess([], 0),  # git checkout
         ]
 
         git_deps = {"nemo": {"url": "https://github.com/NVIDIA/NeMo.git", "commit": "v1.0"}}
@@ -282,8 +284,9 @@ class TestCloneGitRepos:
         with patch('os.path.exists', return_value=True):
             clone_git_repos(git_deps, "/tmp/test", "/tmp/install")
 
-        # Should call: validate cache, commit check, validate target (inc. remotes), fetch cache, checkout
-        assert mock_run.call_count == 6
+        # Should call: validate cache, commit check, validate target (inc. remotes), fetch cache
+        assert mock_run.call_count == 5
+        assert mock_run_git.call_args.args[0] == ['checkout', '-f', '--progress', 'v1.0']
 
     def test_clone_git_repos_empty_deps(self):
         """Test git repository cloning with empty dependencies."""

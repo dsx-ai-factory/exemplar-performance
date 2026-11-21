@@ -83,6 +83,7 @@ from llmb_install.utils.filesystem import (
 from llmb_install.utils.git import ensure_git_lfs_configured, is_git_lfs_installed
 from llmb_install.utils.install_summary import write_install_summary_file
 from llmb_install.utils.logging import get_logger, setup_logging
+from llmb_install.utils.memory import allocator_diagnostic
 
 
 def _nvcrectl_setup_init(
@@ -765,6 +766,10 @@ class Installer:
         except Exception as e:
             raise _ResumeExecutionError(e) from e
 
+    def _needs_git_lfs(self, args: argparse.Namespace, state_result) -> bool:
+        """--record and express --list-workloads clone nothing, unless a saved installation resumes first."""
+        return bool(args.play or state_result or not (args.record or getattr(args, 'list_workloads', False)))
+
     def run(self, args: argparse.Namespace) -> None:
         """Run the installer with the given arguments.
 
@@ -774,29 +779,31 @@ class Installer:
         # Set up logging based on verbose flag
         log_level = "DEBUG" if args.verbose else "INFO"
         setup_logging(level=log_level)
-
-        # Check for Git LFS availability
-        if not is_git_lfs_installed():
-            print("\nError: Git LFS is not installed.")
-            print("Some recipes require Git LFS for downloading large files.")
-            print("\nPlease install Git LFS:")
-            print("  - Ubuntu/Debian: sudo apt-get install git-lfs")
-            print("  - RHEL/CentOS: sudo yum install git-lfs")
-            print("\nFor more information, visit: https://git-lfs.com/")
-            raise SystemExit(EXIT_ERROR) from None
-
-        # Ensure Git LFS is configured
-        try:
-            ensure_git_lfs_configured()
-        except Exception as e:
-            print(f"\nError: Failed to configure Git LFS: {e}")
-            print("Please run 'git lfs install' manually and try again.")
-            raise SystemExit(EXIT_ERROR) from e
+        self.logger.debug("Allocator setup: %s", allocator_diagnostic())
 
         # Check for resume state BEFORE loading workloads
         # This ensures we load from the correct repository location (llmb_repo copy vs original)
         state_result = load_install_state()
         resume_config = None  # Track resume config for error handling
+
+        if self._needs_git_lfs(args, state_result):
+            # Check for Git LFS availability
+            if not is_git_lfs_installed():
+                print("\nError: Git LFS is not installed.")
+                print("Some recipes require Git LFS for downloading large files.")
+                print("\nPlease install Git LFS:")
+                print("  - Ubuntu/Debian: sudo apt-get install git-lfs")
+                print("  - RHEL/CentOS: sudo yum install git-lfs")
+                print("\nFor more information, visit: https://git-lfs.com/")
+                raise SystemExit(EXIT_ERROR) from None
+
+            # Ensure Git LFS is configured
+            try:
+                ensure_git_lfs_configured()
+            except Exception as e:
+                print(f"\nError: Failed to configure Git LFS: {e}")
+                print("Please run 'git lfs install' manually and try again.")
+                raise SystemExit(EXIT_ERROR) from e
 
         if state_result:
             config, _, _, _ = state_result  # Unpack with new existing_cluster_config field
@@ -966,10 +973,14 @@ class Installer:
         print(f"Environment type: {config.venv_type}")
         print(f"Install path: {config.install_path}")
         print(f"GPU type: {config.gpu_type}")
+        print(f"Cluster type: {config.execution_target}")
         print(f"Node architecture: {config.node_architecture}")
         if config.nvl_domain is not None:
             print(f"NVLink domain: NVL{config.nvl_domain}")
-        print(f"Install method: {config.image_download_method}")
+        if config.execution_target == ExecutionTarget.KUBERNETES:
+            print(f"Namespace: {config.kubernetes.namespace}")
+        else:
+            print(f"Image download method: {config.image_download_method}")
         print(f"Selected workloads: {', '.join(config.selected_workloads)}")
         print()
 
@@ -1272,7 +1283,7 @@ class Installer:
                 target_label = 'Kubernetes' if execution_target == ExecutionTarget.KUBERNETES else 'Slurm'
 
                 print(f"\nExisting installation detected at {install_path} ({gpu_type.upper()})")
-                print(f"  Execution target: {target_label}")
+                print(f"  Cluster type: {target_label}")
                 print(f"  Currently installed: {', '.join(installed_workloads)}")
                 print()
 
@@ -1422,8 +1433,6 @@ class Installer:
         # Resolve GPU-specific images/repos
         filtered_workloads = resolve_gpu_overrides(filtered_workloads, gpu_type)
 
-        # For Slurm installs, ask where image/dataset downloads run.
-        # Kubernetes skips downloads entirely so this choice does not apply.
         if is_kubernetes:
             image_download_method = 'local'
         else:
@@ -1711,11 +1720,15 @@ class Installer:
         locked_prefix = "🔒 " if is_resume else ""
         print(f"{locked_prefix}Install Path: {config.install_path}")
         print(f"{locked_prefix}GPU Type: {config.gpu_type}")
+        print(f"{locked_prefix}Cluster Type: {config.execution_target}")
         print(f"{locked_prefix}Node Architecture: {config.node_architecture}")
         if config.nvl_domain is not None:
             print(f"{locked_prefix}NVLink Domain: NVL{config.nvl_domain}")
         print(f"{locked_prefix}Virtual Environment: {config.venv_type}")
-        print(f"Install Mode: {config.image_download_method}")
+        if config.execution_target == ExecutionTarget.KUBERNETES:
+            print(f"{locked_prefix}Namespace: {config.kubernetes.namespace}")
+        else:
+            print(f"Image Download Method: {config.image_download_method}")
 
         if config.slurm:
             print(f"SLURM Account: {config.slurm.account}")
@@ -2019,14 +2032,14 @@ class Installer:
         # Display summary of saved configuration first
         ui.print_section("Express Mode Configuration Summary")
         ui.log(f"GPU Type: {system_config.gpu_type.upper()}")
+        ui.log(f"Cluster Type: {system_config.execution_target}")
         ui.log(f"Architecture: {system_config.node_architecture}")
         ui.log("Environment: uv")
         if use_kubernetes:
-            ui.log("Install Method: kubernetes")
             if system_config.kubernetes:
                 ui.log(f"Namespace: {system_config.kubernetes.namespace}")
         else:
-            ui.log(f"Install Method: {system_config.image_download_method}")
+            ui.log(f"Image Download Method: {system_config.image_download_method}")
             if system_config.slurm:
                 ui.log(f"SLURM Account: {system_config.slurm.account}")
                 ui.log(f"GPU Partition: {system_config.slurm.gpu_partition}")

@@ -171,8 +171,9 @@ class TestDependencyInstallation(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.temp_dir))
 
     @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('llmb_install.core.dependency._run_git_with_progress')
     @patch('subprocess.run')
-    def test_clone_git_repos(self, mock_run, mock_uses_lfs):
+    def test_clone_git_repos(self, mock_run, mock_run_git, mock_uses_lfs):
         """Test cloning git repositories."""
         git_deps = {
             'repo1': {'url': 'https://github.com/test/repo1.git', 'commit': 'abc123'},
@@ -188,23 +189,24 @@ class TestDependencyInstallation(unittest.TestCase):
                     clone_git_repos(git_deps, self.temp_dir, self.temp_dir)
 
         # Verify git operations were called - with caching we expect:
-        # - bare clone for each repo (2)
-        # - regular clone from cache for each repo (2)
+        # - mirror clone for each repo via the progress runner (2)
+        # - checkout for each repo via the progress runner (2)
+        # - regular clone from cache for each repo via subprocess.run (2)
         # - remote add for each repo (2)
-        # - checkout for each repo (2)
-        clone_calls = [call for call in mock_run.call_args_list if 'clone' in str(call)]
-        checkout_calls = [call for call in mock_run.call_args_list if call.args[0][0:2] == ['git', 'checkout']]
+        mirror_clone_calls = [call for call in mock_run_git.call_args_list if call.args[0][0] == 'clone']
+        checkout_calls = [call for call in mock_run_git.call_args_list if call.args[0][0] == 'checkout']
+        cache_clone_calls = [call for call in mock_run.call_args_list if 'clone' in str(call)]
         remote_calls = [call for call in mock_run.call_args_list if call.args[0][0:2] == ['git', 'remote']]
 
         # Verify we got the expected operations with exact counts
-        self.assertEqual(
-            len(clone_calls), 4, "Should have bare clone + regular clone for each repo (2 repos × 2 clones each)"
-        )
+        self.assertEqual(len(mirror_clone_calls), 2, "Should have mirror clone for each repo")
+        self.assertEqual(len(cache_clone_calls), 2, "Should have regular clone from cache for each repo")
         self.assertEqual(len(checkout_calls), 2, "Should have one checkout per repo")
         self.assertEqual(len(remote_calls), 2, "Should have one remote add per repo")
 
+    @patch('llmb_install.core.dependency._run_git_with_progress')
     @patch('subprocess.run')
-    def test_clone_git_repos_with_existing_repo(self, mock_run):
+    def test_clone_git_repos_with_existing_repo(self, mock_run, mock_run_git):
         """Test cloning git repositories when repo already exists but commit is missing."""
         git_deps = {'existing_repo': {'url': 'https://github.com/test/existing.git', 'commit': 'xyz789'}}
 
@@ -222,10 +224,6 @@ class TestDependencyInstallation(unittest.TestCase):
                 # First check: missing (raises error), second check after fetch: exists
                 if side_effect_fn.target_check_count == 1:
                     raise subprocess.CalledProcessError(1, cmd)
-                return Mock(returncode=0)
-            elif cmd[0:2] == ['git', 'fetch']:
-                return Mock(returncode=0)
-            elif cmd[0:2] == ['git', 'checkout']:
                 return Mock(returncode=0)
             elif cmd[0:2] == ['git', '--git-dir']:
                 return Mock(returncode=0)
@@ -245,9 +243,9 @@ class TestDependencyInstallation(unittest.TestCase):
 
         # Should have commit check and fetch from cache
         cat_file_calls = [call for call in mock_run.call_args_list if 'cat-file' in str(call)]
-        fetch_calls = [call for call in mock_run.call_args_list if 'fetch' in str(call)]
+        fetch_calls = [call.args[0] for call in mock_run_git.call_args_list if call.args[0][0] == 'fetch']
         self.assertGreaterEqual(len(cat_file_calls), 1, "Should have cat-file calls for commit checking")
-        self.assertGreaterEqual(len(fetch_calls), 1, "Should have fetch calls for cache updates")
+        self.assertEqual(fetch_calls, [['fetch', '--progress', 'cache']], "Should fetch from cache with progress")
 
     def test_clone_git_repos_empty(self):
         """Test cloning with empty git dependencies."""

@@ -5,6 +5,7 @@
 
 """Tests for git caching functionality using bare repositories."""
 
+import io
 import os
 import subprocess
 from unittest.mock import Mock, patch
@@ -17,13 +18,26 @@ from llmb_install.core.dependency import (
     _commit_exists_in_repo,
     _derive_cache_name_from_url,
     _derive_repo_name_from_url,
+    _extract_git_progress_status,
     _get_default_branch,
     _get_git_cache_dir,
     _has_required_remotes,
     _is_valid_git_repo,
+    _iter_stream_lines,
     _repo_uses_lfs,
+    _run_git_with_progress,
     clone_git_repos,
 )
+
+
+def _make_mock_popen(stderr_bytes: bytes = b'', returncode: int = 0) -> Mock:
+    """Create a mock Popen context manager with a BufferedReader stderr stream."""
+    proc = Mock()
+    proc.stderr = io.BufferedReader(io.BytesIO(stderr_bytes))
+    proc.wait.return_value = returncode
+    proc.__enter__ = Mock(return_value=proc)
+    proc.__exit__ = Mock(return_value=False)
+    return proc
 
 
 class TestGitCaching:
@@ -108,13 +122,17 @@ class TestGitCaching:
         assert result is False
 
     @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('subprocess.Popen')
     @patch('subprocess.run')
     @patch('os.path.exists')
     @patch('os.makedirs')
-    def test_clone_or_get_from_cache_new_repo(self, mock_makedirs, mock_exists, mock_subprocess, mock_uses_lfs):
+    def test_clone_or_get_from_cache_new_repo(
+        self, mock_makedirs, mock_exists, mock_subprocess, mock_popen, mock_uses_lfs
+    ):
         """Test caching behavior when repository doesn't exist in cache."""
         # Setup mocks
         mock_exists.side_effect = lambda path: False  # Neither cache nor target exist
+        mock_popen.return_value = _make_mock_popen()
         mock_subprocess.return_value = Mock(returncode=0, stdout='')
         mock_uses_lfs.return_value = False  # Non-LFS repo
 
@@ -126,18 +144,21 @@ class TestGitCaching:
             commit="abc123",
         )
 
-        # Verify git operations: mirror clone, clone from cache, remote setup
+        # Verify the mirror clone goes through Popen with --progress
+        mock_popen.assert_called_once()
+        popen_call = mock_popen.call_args
+        assert popen_call.args[0] == [
+            'git',
+            'clone',
+            '--mirror',
+            '--progress',
+            'https://github.com/test/repo.git',
+            '/install/.cache/git_repos/github.com_test_repo.git',
+        ]
+        assert popen_call.kwargs['env']['GIT_TERMINAL_PROMPT'] == '0'
+
+        # Verify local git operations: clone from cache, remote setup
         expected_calls = [
-            (
-                [
-                    'git',
-                    'clone',
-                    '--mirror',
-                    'https://github.com/test/repo.git',
-                    '/install/.cache/git_repos/github.com_test_repo.git',
-                ],
-                {'check': True, 'capture_output': True, 'text': True},
-            ),
             (
                 [
                     'git',
@@ -323,12 +344,13 @@ class TestCloneGitReposIntegration:
     """Integration tests for clone_git_repos function."""
 
     @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('subprocess.Popen')
     @patch('subprocess.run')
     @patch('os.path.exists')
     @patch('os.makedirs')
     @patch('llmb_install.core.dependency._commit_exists_in_repo')
     def test_clone_git_repos_with_caching(
-        self, mock_commit_exists, mock_makedirs, mock_exists, mock_subprocess, mock_uses_lfs
+        self, mock_commit_exists, mock_makedirs, mock_exists, mock_subprocess, mock_popen, mock_uses_lfs
     ):
         """Test clone_git_repos with caching enabled."""
         git_deps = {'nemo': {'url': 'https://github.com/NVIDIA/NeMo.git', 'commit': 'abc123'}}
@@ -336,31 +358,35 @@ class TestCloneGitReposIntegration:
         # Setup mocks
         mock_exists.side_effect = lambda path: False  # Nothing exists initially
         mock_commit_exists.return_value = True  # Commit exists, no need to fetch
+        mock_popen.return_value = _make_mock_popen()
         mock_subprocess.return_value = Mock(returncode=0, stdout='')
         mock_uses_lfs.return_value = False  # Non-LFS repo
 
         with patch('builtins.print'):  # Suppress output
             clone_git_repos(git_deps, "/target", "/install")
 
-        # Should have called: bare clone, clone from cache, remote setup, checkout
-        assert mock_subprocess.call_count == 4
+        # Mirror clone and checkout run via Popen; clone from cache and remote setup via subprocess.run
+        assert mock_popen.call_count == 2
+        assert mock_subprocess.call_count == 2
 
-        # Check that checkout was called with correct commit
-        checkout_calls = [call for call in mock_subprocess.call_args_list if call.args[0][0:2] == ['git', 'checkout']]
-        assert len(checkout_calls) == 1
-        assert checkout_calls[0].args[0] == ['git', 'checkout', '-f', 'abc123']
+        # The checkout of the pinned commit is the last thing that runs, and reports progress
+        assert mock_popen.call_args.args[0] == ['git', 'checkout', '-f', '--progress', 'abc123']
 
     @patch('os.environ.get')
+    @patch('subprocess.Popen')
     @patch('subprocess.run')
     @patch('os.path.exists')
     @patch('llmb_install.core.dependency._clone_or_get_from_cache')
-    def test_clone_git_repos_cache_disabled(self, mock_cache_clone, mock_exists, mock_subprocess, mock_env_get):
+    def test_clone_git_repos_cache_disabled(
+        self, mock_cache_clone, mock_exists, mock_subprocess, mock_popen, mock_env_get
+    ):
         """Test clone_git_repos with caching disabled by environment variable."""
         git_deps = {'nemo': {'url': 'https://github.com/NVIDIA/NeMo.git', 'commit': 'abc123'}}
 
         # Setup mocks
         mock_env_get.return_value = 'true'  # LLMB_DISABLE_GIT_CACHE=true
         mock_exists.return_value = False
+        mock_popen.return_value = _make_mock_popen()
         mock_subprocess.return_value = Mock(returncode=0)
 
         with patch('builtins.print'):  # Suppress output
@@ -369,13 +395,12 @@ class TestCloneGitReposIntegration:
         # Should NOT call cache function when disabled
         mock_cache_clone.assert_not_called()
 
-        # Should directly clone and checkout
-        clone_calls = [
-            call
-            for call in mock_subprocess.call_args_list
-            if call.args[0][0:2] == ['git', 'clone'] and '--bare' not in call.args[0]
+        # Direct clone (cache disabled) and the checkout both go through Popen
+        assert [call.args[0] for call in mock_popen.call_args_list] == [
+            ['git', 'clone', '--no-checkout', '--progress', 'https://github.com/NVIDIA/NeMo.git', '/target/NeMo'],
+            ['git', 'checkout', '-f', '--progress', 'abc123'],
         ]
-        assert len(clone_calls) >= 1
+        assert mock_popen.call_args_list[0].kwargs['env']['GIT_TERMINAL_PROMPT'] == '0'
 
     def test_clone_git_repos_empty_deps(self):
         """Test clone_git_repos with empty dependencies."""
@@ -390,25 +415,29 @@ class TestCloneGitReposIntegration:
         assert result is None
 
     @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('subprocess.Popen')
     @patch('subprocess.run')
     @patch('os.path.exists')
     @patch('os.makedirs')
     @patch('llmb_install.core.dependency._commit_exists_in_repo')
-    def test_git_error_handling(self, mock_commit_exists, mock_makedirs, mock_exists, mock_subprocess, mock_uses_lfs):
+    def test_git_error_handling(
+        self, mock_commit_exists, mock_makedirs, mock_exists, mock_subprocess, mock_popen, mock_uses_lfs
+    ):
         """Test error handling when git commands fail."""
         git_deps = {'nemo': {'url': 'https://github.com/NVIDIA/NeMo.git', 'commit': 'abc123'}}
 
         # Setup mocks
         mock_exists.side_effect = lambda path: False
         mock_commit_exists.return_value = True
+        mock_popen.return_value = _make_mock_popen()
         mock_uses_lfs.return_value = False  # Non-LFS repo
 
-        def subprocess_side_effect(cmd, **kwargs):
-            if cmd[0:2] == ['git', 'checkout']:
-                raise subprocess.CalledProcessError(1, cmd, stderr="Commit not found")
-            return Mock(returncode=0, stdout='')
+        def popen_side_effect(cmd, **kwargs):
+            # The checkout of the pinned commit is what fails here
+            return _make_mock_popen(returncode=1 if cmd[0:2] == ['git', 'checkout'] else 0)
 
-        mock_subprocess.side_effect = subprocess_side_effect
+        mock_popen.side_effect = popen_side_effect
+        mock_subprocess.return_value = Mock(returncode=0, stdout='')
 
         with pytest.raises(subprocess.CalledProcessError):
             with patch('builtins.print'):  # Suppress output
@@ -648,3 +677,293 @@ class TestDefaultBranchDetection:
         result = _get_default_branch("/path/to/repo", "cache")
 
         assert result is None
+
+
+class TestGitProgress:
+    """Tests for git progress status parsing and live progress bar updates."""
+
+    def test_extract_git_progress_status_recognizes_phases(self):
+        """Progress lines (with or without 'remote:' prefix) return cleaned status text."""
+        assert (
+            _extract_git_progress_status("remote: Enumerating objects: 420, done.") == "Enumerating objects: 420, done."
+        )
+        assert (
+            _extract_git_progress_status("remote: Counting objects:  45% (189/420)")
+            == "Counting objects:  45% (189/420)"
+        )
+        assert (
+            _extract_git_progress_status("remote: Compressing objects: 100% (200/200), done.")
+            == "Compressing objects: 100% (200/200), done."
+        )
+        assert (
+            _extract_git_progress_status("Receiving objects:  42% (51832/123410), 84.50 MiB | 12.34 MiB/s")
+            == "Receiving objects:  42% (51832/123410), 84.50 MiB | 12.34 MiB/s"
+        )
+        assert (
+            _extract_git_progress_status("Resolving deltas:  75% (6000/8000)") == "Resolving deltas:  75% (6000/8000)"
+        )
+        assert _extract_git_progress_status("Updating files:  90% (900/1000)") == "Updating files:  90% (900/1000)"
+        assert (
+            _extract_git_progress_status("Filtering content:  50% (2/4), 10.00 MiB | 5.00 MiB/s")
+            == "Filtering content:  50% (2/4), 10.00 MiB | 5.00 MiB/s"
+        )
+
+    def test_extract_git_progress_status_ignores_non_progress_lines(self):
+        """Non-progress stderr output returns None so it does not clutter the progress bar."""
+        assert _extract_git_progress_status("Cloning into bare repository '/cache/repo.git'...") is None
+        assert _extract_git_progress_status("From https://github.com/NVIDIA/NeMo") is None
+        assert _extract_git_progress_status(" * [new branch]      main       -> origin/main") is None
+        assert (
+            _extract_git_progress_status("fatal: unable to access 'https://example.invalid/': Operation too slow")
+            is None
+        )
+        assert _extract_git_progress_status("") is None
+        assert _extract_git_progress_status("error: 1234 bytes of body are still expected") is None
+        assert _extract_git_progress_status("remote: Total 3 (delta 1), reused 0 (delta 0), pack-reused 0") is None
+        assert _extract_git_progress_status("Submodule path 'sub': checked out 'abc123'") is None
+
+    def test_extract_git_progress_status_matches_shape_not_phase_name(self):
+        """Progress is recognised by its shape, so older git wording, other locales and count-only phases match."""
+        assert _extract_git_progress_status("Checking out files:  50% (1/2)") == "Checking out files:  50% (1/2)"
+        assert _extract_git_progress_status("Empfange Objekte:  42% (42/100)") == "Empfange Objekte:  42% (42/100)"
+        assert _extract_git_progress_status("remote: Enumerating objects: 12345   ") == "Enumerating objects: 12345"
+
+    def test_iter_stream_lines_splits_on_cr_and_keeps_multibyte_chars_split_across_reads(self):
+        """A UTF-8 character straddling two read1() chunks is decoded intact, and the unterminated tail is flushed."""
+        chunks = iter([b"caf\xc3", b"\xa9\rnext\r\nlast", b""])
+        stream = Mock(read1=Mock(side_effect=lambda _n: next(chunks)))
+
+        assert list(_iter_stream_lines(stream)) == ["caf\u00e9", "next", "last"]
+
+    @patch('llmb_install.core.dependency.Progress')
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_streams_cr_delimited_updates(self, mock_popen, mock_progress_cls):
+        """CR-delimited stderr progress lines update the rich task status."""
+        stderr_stream = (
+            b"Cloning into bare repository '/cache/repo.git'...\n"
+            b"remote: Counting objects:  50% (5/10)\r"
+            b"Receiving objects:  42% (42/100), 12.00 MiB | 6.00 MiB/s\r"
+            b"Resolving deltas: 100% (10/10), done.\n"
+        )
+        mock_popen.return_value = _make_mock_popen(stderr_bytes=stderr_stream, returncode=0)
+        mock_progress = Mock()
+        mock_progress.add_task.return_value = 1
+        mock_progress_cls.return_value.__enter__.return_value = mock_progress
+
+        _run_git_with_progress(
+            ['clone', '--mirror', '--progress', 'https://example.invalid/r.git', '/cache/r.git'], "Cloning repo"
+        )
+
+        mock_progress.add_task.assert_called_once_with("Cloning repo", total=None, status="")
+        statuses = [call.kwargs['status'] for call in mock_progress.update.call_args_list]
+        assert statuses == [
+            "Counting objects:  50% (5/10)",
+            "Receiving objects:  42% (42/100), 12.00 MiB | 6.00 MiB/s",
+            "Resolving deltas: 100% (10/10), done.",
+        ]
+
+    @patch('llmb_install.core.dependency.Progress')
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_fallback_when_no_parseable_output(self, mock_popen, mock_progress_cls):
+        """When git emits no progress lines, the indeterminate task runs and completes cleanly."""
+        mock_popen.return_value = _make_mock_popen(stderr_bytes=b"Cloning into '/target/repo'...\n", returncode=0)
+        mock_progress = Mock()
+        mock_progress.add_task.return_value = 1
+        mock_progress_cls.return_value.__enter__.return_value = mock_progress
+
+        _run_git_with_progress(['fetch', '--progress', 'origin'], "Fetching repo", cwd="/target/repo")
+
+        mock_progress.add_task.assert_called_once_with("Fetching repo", total=None, status="")
+        mock_progress.update.assert_not_called()
+        assert mock_popen.call_args.kwargs['cwd'] == "/target/repo"
+        assert mock_popen.call_args.args[0] == ['git', 'fetch', '--progress', 'origin']
+
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_error_preserves_fatal_stderr_without_progress_noise(self, mock_popen):
+        """On failure, CalledProcessError.stderr includes fatal lines but strips CR progress spam."""
+        stderr_stream = (
+            b"Cloning into bare repository '/cache/repo.git'...\n"
+            b"Receiving objects:  10% (10/100), 1.00 MiB | 512.00 KiB/s\r"
+            b"fatal: RPC failed; curl 28 Operation too slow. Less than 1024 bytes/sec transferred the last 60 seconds\n"
+        )
+        mock_popen.return_value = _make_mock_popen(stderr_bytes=stderr_stream, returncode=128)
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _run_git_with_progress(
+                ['clone', '--mirror', '--progress', 'https://example.invalid/r.git', '/cache/r.git'], "Cloning repo"
+            )
+
+        assert exc_info.value.returncode == 128
+        assert "Operation too slow" in exc_info.value.stderr
+        assert "Receiving objects" not in exc_info.value.stderr
+        assert exc_info.value.cmd[:4] == ['git', 'clone', '--mirror', '--progress']
+
+    @patch('llmb_install.core.dependency.Progress')
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_reassembles_lines_split_across_chunks(self, mock_popen, mock_progress_cls):
+        """A progress or error line split across read1() chunks is reassembled before parsing."""
+        proc = _make_mock_popen(returncode=0)
+        chunks = iter([b"remote: Receiving obj", b"ects:  75% (75/100), 5.00 MiB | 2.50 MiB/s\r", b""])
+        proc.stderr = Mock(read1=Mock(side_effect=lambda _n: next(chunks)))
+        mock_popen.return_value = proc
+        mock_progress = Mock()
+        mock_progress.add_task.return_value = 1
+        mock_progress_cls.return_value.__enter__.return_value = mock_progress
+
+        _run_git_with_progress(['fetch', '--progress', 'origin'], "Fetching repo")
+
+        mock_progress.update.assert_called_once_with(
+            1, status="Receiving objects:  75% (75/100), 5.00 MiB | 2.50 MiB/s"
+        )
+
+    @patch('llmb_install.core.dependency._get_default_branch', return_value='main')
+    @patch('llmb_install.core.dependency._repo_uses_lfs', return_value=True)
+    @patch('llmb_install.core.dependency._commit_exists_in_repo', side_effect=[False, True])
+    @patch('llmb_install.core.dependency._cleanup_invalid_git_repo')
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    @patch('os.path.exists')
+    def test_cache_fetch_and_lfs_fetch_report_progress(
+        self, mock_exists, mock_run, mock_popen, _mock_cleanup, _mock_commit_exists, _mock_lfs, _mock_branch
+    ):
+        """Both cache-miss fetch and LFS origin fetch pass --progress."""
+        mock_exists.side_effect = lambda path: path.endswith('.git')  # Cache exists, target does not
+        mock_popen.side_effect = lambda *args, **kwargs: _make_mock_popen()
+        mock_run.return_value = Mock(returncode=0, stdout='')
+
+        _clone_or_get_from_cache("test_repo", "https://github.com/test/repo.git", "/install", "/target", "abc123")
+
+        assert mock_popen.call_count == 2
+        cache_fetch_call, lfs_fetch_call = mock_popen.call_args_list
+        assert cache_fetch_call.args[0] == ['git', 'fetch', '--progress', 'origin']
+        assert cache_fetch_call.kwargs['cwd'] == '/install/.cache/git_repos/github.com_test_repo.git'
+        assert lfs_fetch_call.args[0] == ['git', 'fetch', '--progress', 'origin']
+        assert lfs_fetch_call.kwargs['cwd'] == '/target/repo'
+
+    @patch('llmb_install.core.dependency._run_git_with_progress')
+    @patch('subprocess.run')
+    @patch('os.path.exists', return_value=False)
+    @patch('os.makedirs')
+    def test_clone_line_and_bar_use_different_wording(
+        self, _mock_makedirs, _mock_exists, mock_run, mock_run_with_progress, capsys
+    ):
+        """The printed line names the operation; the bar names the phase, so they don't read as a duplicate."""
+        mock_run.return_value = Mock(returncode=0, stdout='')
+
+        _clone_or_get_from_cache("nemo", "https://github.com/NVIDIA/NeMo.git", "/install", "/target", "abc123")
+
+        assert capsys.readouterr().out.startswith("  Cloning nemo from https://github.com/NVIDIA/NeMo.git")
+        assert mock_run_with_progress.call_args.args[1] == "Downloading nemo"
+
+    @patch('llmb_install.core.dependency._interactive_output', return_value=False)
+    @patch('llmb_install.core.dependency._commit_exists_in_repo', return_value=True)
+    @patch('llmb_install.core.dependency._cleanup_invalid_git_repo')
+    @patch('os.path.exists', return_value=True)
+    def test_cached_repo_is_announced_when_no_live_display(
+        self, _mock_exists, _mock_cleanup, _mock_commit_exists, _mock_interactive, capsys
+    ):
+        """A cached repo does no network work, so without this line the log looks stuck."""
+        _clone_or_get_from_cache("nemo", "https://github.com/NVIDIA/NeMo.git", "/install", "/target", "abc123")
+
+        assert "  Using cached nemo" in capsys.readouterr().out
+
+    @patch('llmb_install.core.dependency._interactive_output', return_value=False)
+    @patch('llmb_install.core.dependency.Progress')
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_disables_live_display_when_not_a_terminal(
+        self, mock_popen, mock_progress_cls, _mock_interactive
+    ):
+        """Non-TTY output gets no bar frames (hence no control codes, no stray newlines)."""
+        mock_popen.return_value = _make_mock_popen(stderr_bytes=b"Receiving objects:  42% (42/100)\r")
+
+        _run_git_with_progress(['fetch', '--progress', 'origin'], "Fetching repo")
+
+        assert mock_progress_cls.call_args.kwargs['disable'] is True
+
+    @patch('llmb_install.core.dependency._interactive_output', return_value=True)
+    @patch('llmb_install.core.dependency.Progress')
+    @patch('subprocess.Popen')
+    def test_run_git_with_progress_enables_live_display_on_a_terminal(
+        self, mock_popen, mock_progress_cls, _mock_interactive
+    ):
+        """A terminal keeps the live display, which clears itself when done."""
+        mock_popen.return_value = _make_mock_popen(stderr_bytes=b"Receiving objects:  42% (42/100)\r")
+
+        _run_git_with_progress(['fetch', '--progress', 'origin'], "Fetching repo")
+
+        assert mock_progress_cls.call_args.kwargs['disable'] is False
+        assert mock_progress_cls.call_args.kwargs['transient'] is True
+
+    @patch('llmb_install.core.dependency._repo_uses_lfs')
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    @patch('os.path.exists')
+    @patch('os.makedirs')
+    def test_clone_of_uncached_repo_announces_name_and_url(
+        self, mock_makedirs, mock_exists, mock_run, mock_popen, mock_uses_lfs, capsys
+    ):
+        """Name and URL are printed up front, so logs show what a long silence refers to."""
+        mock_exists.side_effect = lambda path: False
+        mock_popen.return_value = _make_mock_popen()
+        mock_run.return_value = Mock(returncode=0, stdout='')
+        mock_uses_lfs.return_value = False
+
+        _clone_or_get_from_cache("nemo", "https://github.com/NVIDIA/NeMo.git", "/install", "/target", "abc123")
+
+        assert "  Cloning nemo from https://github.com/NVIDIA/NeMo.git" in capsys.readouterr().out
+
+    @patch('llmb_install.core.dependency._interactive_output', return_value=False)
+    @patch('llmb_install.core.dependency._get_default_branch', return_value='main')
+    @patch('llmb_install.core.dependency._repo_uses_lfs', return_value=True)
+    @patch('llmb_install.core.dependency._commit_exists_in_repo', side_effect=[False, True])
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    @patch('os.path.exists')
+    def test_fetch_is_announced_when_no_live_display(
+        self, mock_exists, mock_run, mock_popen, _commit_exists, _lfs, _branch, _interactive, capsys
+    ):
+        """A logged install still records the fetches, which the bar would otherwise be the only trace of."""
+        mock_exists.side_effect = lambda path: path.endswith('.git')
+        mock_popen.side_effect = lambda *args, **kwargs: _make_mock_popen()
+        mock_run.return_value = Mock(returncode=0, stdout='')
+
+        _clone_or_get_from_cache("nemo", "https://github.com/NVIDIA/NeMo.git", "/install", "/target", "abc123")
+
+        assert capsys.readouterr().out.count("  Fetching nemo from https://github.com/NVIDIA/NeMo.git...") == 2
+
+    @patch('llmb_install.core.dependency._interactive_output', return_value=True)
+    @patch('llmb_install.core.dependency._get_default_branch', return_value='main')
+    @patch('llmb_install.core.dependency._repo_uses_lfs', return_value=True)
+    @patch('llmb_install.core.dependency._commit_exists_in_repo', side_effect=[False, True])
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    @patch('os.path.exists')
+    def test_fetch_is_not_announced_when_the_bar_shows_it(
+        self, mock_exists, mock_run, mock_popen, _commit_exists, _lfs, _branch, _interactive, capsys
+    ):
+        """On a terminal the 'Downloading nemo' bar covers the fetch, so no 'Fetching' line is printed."""
+        mock_exists.side_effect = lambda path: path.endswith('.git')
+        mock_popen.side_effect = lambda *args, **kwargs: _make_mock_popen()
+        mock_run.return_value = Mock(returncode=0, stdout='')
+
+        _clone_or_get_from_cache("nemo", "https://github.com/NVIDIA/NeMo.git", "/install", "/target", "abc123")
+
+        assert "Fetching nemo" not in capsys.readouterr().out
+
+    @patch('llmb_install.core.dependency._run_git_with_progress')
+    @patch('llmb_install.core.dependency._clone_or_get_from_cache', return_value='/target/NeMo-RL')
+    def test_submodule_update_reports_progress(self, _mock_cache_clone, mock_run_with_progress):
+        """Submodules can be large network fetches, so they go through the progress runner too."""
+        git_deps = {'nemo_rl': {'url': 'https://github.com/NVIDIA/NeMo-RL.git', 'commit': 'abc123', 'submodules': True}}
+
+        with patch('builtins.print'):
+            clone_git_repos(git_deps, "/target", "/install")
+
+        assert mock_run_with_progress.call_args.args[0] == [
+            'submodule',
+            'update',
+            '--init',
+            '--recursive',
+            '--progress',
+        ]
+        assert mock_run_with_progress.call_args.kwargs['cwd'] == '/target/NeMo-RL'

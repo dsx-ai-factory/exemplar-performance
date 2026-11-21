@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple, TypeVar
 
 from llmb_install.utils.logging import get_logger
+from llmb_install.utils.memory import process_memory_limit as _address_space_limit
 
 logger = get_logger(__name__)
 
@@ -241,44 +242,140 @@ def _normalize_hf_token(token: str) -> Optional[str]:
     return t or None
 
 
-# Conservative HuggingFace download parallelism. Peak download memory scales with total
-# concurrent Xet streams (max_workers x per-file concurrency), so we pin both low to stay
-# under tight per-job/per-user memory caps (`ulimit -v` or cgroup `memory.max`). Raise on
-# memory-rich hosts: LLMB_HF_MAX_WORKERS (files) and HF_XET_FIXED_DOWNLOAD_CONCURRENCY (streams).
-_DEFAULT_HF_MAX_WORKERS = 4
+# HuggingFace download parallelism. Leave adaptive Xet streams enabled; the old
+# HF_XET_FIXED_DOWNLOAD_CONCURRENCY=1 workaround severely limited throughput.
+_DEFAULT_HF_MAX_WORKERS = 8
+# The normal-mode fractions used by hf-xet 1.8.0 for its memory-derived buffers.
+_XET_BUFFER_DIVISORS = (
+    ("download_buffer_size", 16),
+    ("download_buffer_perfile_size", 64),
+    ("download_buffer_limit", 4),
+)
 
 
-def _hf_max_workers() -> int:
-    """Max number of concurrent download streams. Override with LLMB_HF_MAX_WORKERS."""
+@dataclass(frozen=True)
+class _HFDownloadSettings:
+    max_workers: int
+    process_limit: Optional[int]
+    buffer_sizes: Optional[Tuple[int, int, int]] = None
+
+
+_download_settings: Optional[_HFDownloadSettings] = None
+_download_settings_announced = False
+
+
+def _hf_worker_override() -> Optional[int]:
+    """Read an explicit file-worker count once; invalid values use the automatic default."""
     raw = os.environ.get("LLMB_HF_MAX_WORKERS")
     if raw is None:
-        return _DEFAULT_HF_MAX_WORKERS
+        return None
     try:
         value = int(raw)
     except ValueError:
-        logger.warning(
-            "Ignoring invalid LLMB_HF_MAX_WORKERS=%r (expected integer); using %d", raw, _DEFAULT_HF_MAX_WORKERS
-        )
-        return _DEFAULT_HF_MAX_WORKERS
+        logger.warning("Ignoring invalid LLMB_HF_MAX_WORKERS=%r (expected integer); using automatic default", raw)
+        return None
     if value < 1:
-        logger.warning("Ignoring LLMB_HF_MAX_WORKERS=%d (must be >= 1); using %d", value, _DEFAULT_HF_MAX_WORKERS)
-        return _DEFAULT_HF_MAX_WORKERS
+        logger.warning("Ignoring LLMB_HF_MAX_WORKERS=%d (must be >= 1); using automatic default", value)
+        return None
     return value
 
 
+def _cap_xet_download_buffers(process_limit: int) -> Optional[Tuple[int, int, int]]:
+    """Cap automatic buffers using Xet's normal fractions, not a process-memory estimate.
+
+    Xet handles host/cgroup sizing; min(current, cap) keeps any smaller settings.
+    These are byte-exact fractions of the process limit, without rounding up or
+    reproducing Xet's floors. Explicit per-buffer environment overrides win.
+    """
+    from hf_xet import XetConfig
+
+    config = XetConfig()
+    capped = False
+    for setting, divisor in _XET_BUFFER_DIVISORS:
+        name = f"HF_XET_RECONSTRUCTION_{setting.upper()}"
+        current = config.get(f"reconstruction.{setting}")
+        cap = process_limit // divisor
+        explicit = name in os.environ
+        if not explicit and current > cap:
+            os.environ[name] = str(cap)
+            capped = True
+
+    # Read back after all overrides so logging reflects Xet's normalized settings,
+    # including any explicit overrides that intentionally exceed the automatic caps.
+    if capped:
+        config = XetConfig()
+    base = config.get("reconstruction.download_buffer_size")
+    per_file = config.get("reconstruction.download_buffer_perfile_size")
+    ceiling = config.get("reconstruction.download_buffer_limit")
+    return (base, per_file, ceiling) if capped else None
+
+
+def _get_download_settings() -> _HFDownloadSettings:
+    """Resolve settings once, before downloads create Xet's cached session.
+
+    hf-xet 1.8.0 handles host/cgroup limits itself, but ignores RLIMIT_AS/DATA.
+    Cap its three automatic download buffers at the same normal-mode fractions
+    of the finite process limit (1/16, 1/64, 1/4). This leaves room for non-buffer
+    memory without changing file workers or adaptive streams. It is not a bound
+    on total process memory: stacks, allocator reservations and temporary data
+    also consume address space.
+
+    TODO: remove these caps once upstream sizes buffers from process limits.
+    Re-test address-space-limited hosts and the multi-file OOM case when
+    upgrading hf-xet. These fractions were validated on the target
+    process-limited clusters.
+    """
+    global _download_settings
+    if _download_settings is not None:
+        return _download_settings
+
+    override = _hf_worker_override()
+    workers = override if override is not None else _DEFAULT_HF_MAX_WORKERS
+    process_limit = _address_space_limit()
+    buffer_sizes = None
+    xet_disabled = os.environ.get("HF_HUB_DISABLE_XET", "").upper() in {"1", "ON", "YES", "TRUE"}
+    if not xet_disabled and process_limit is not None:
+        buffer_sizes = _cap_xet_download_buffers(process_limit)
+
+    _download_settings = _HFDownloadSettings(workers, process_limit, buffer_sizes)
+    return _download_settings
+
+
+def _hf_max_workers() -> int:
+    """Return the file-worker count selected before the first download."""
+    return _get_download_settings().max_workers
+
+
+def _announce_download_settings() -> None:
+    """Show concurrency and, when applied, one verbose buffer-cap diagnostic."""
+    global _download_settings_announced
+    if _download_settings_announced:
+        return
+    settings = _get_download_settings()
+    print(f"HuggingFace downloads: up to {settings.max_workers} workers (adjust with LLMB_HF_MAX_WORKERS).")
+    if settings.buffer_sizes is not None and settings.process_limit is not None:
+        base, per_file, ceiling = settings.buffer_sizes
+        logger.debug(
+            "HuggingFace downloads: detected process memory limit %g GiB; "
+            "capped Xet buffers to shared=%g MiB, per-file=%g MiB, ceiling=%g MiB.",
+            settings.process_limit / 1024**3,
+            base / 1024**2,
+            per_file / 1024**2,
+            ceiling / 1024**2,
+        )
+    _download_settings_announced = True
+
+
 def set_hf_environment(cache_dir: str) -> None:
-    """Set HuggingFace environment variables.
+    """Set cache paths and resolve download settings before importing HF libraries.
 
-    CRITICAL: Must be called before any 'import transformers' or 'import huggingface_hub'
-    statements, as HF_HOME is read and cached at module import time.
-
-    Args:
-        cache_dir: Base cache directory (e.g., $LLMB_INSTALL/.cache/huggingface)
+    HF_HOME must also precede XetConfig inspection: importing hf_xet initializes
+    logging under that cache. Buffer policy is resolved only on the first call;
+    later repos and offline verification reuse it without changing the runtime.
     """
     os.environ["HF_HOME"] = cache_dir
     os.environ["HF_HUB_CACHE"] = os.path.join(cache_dir, "hub")
-    # Bound peak download memory (see _DEFAULT_HF_MAX_WORKERS); setdefault keeps user overrides.
-    os.environ.setdefault("HF_XET_FIXED_DOWNLOAD_CONCURRENCY", "1")
+    _get_download_settings()
 
 
 def _hf_hub_cache_dir(cache_dir: str) -> str:
@@ -580,6 +677,7 @@ def download_huggingface_cache_assets(
 
     print("\nDownloading HuggingFace files")
     print("--------------------------------")
+    _announce_download_settings()
     print("\nRequired HuggingFace repos:")
     for spec in specs:
         assets = ", ".join(sorted(spec.assets))
@@ -738,6 +836,7 @@ def download_huggingface_repos(
 
     print("\nDownloading HuggingFace repos")
     print("--------------------------------")
+    _announce_download_settings()
     print("\nRequired HuggingFace repos:")
     for spec in specs:
         local_dir = resolve_huggingface_repo_local_dir(spec, install_path)

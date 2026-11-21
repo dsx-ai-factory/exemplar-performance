@@ -87,7 +87,7 @@ class TestArchiveModule:
         assert all("scratch" not in path for path in arcpaths)
 
     def test_build_archive_file_list_microbenchmark_nccl(self, tmp_path):
-        """TODO(temporary): remove when microbenchmark_nccl aligns with standard layout."""
+        """Support the legacy sbatch NCCL layout from 26.10.xx; TODO: remove once 26.10.xx is EOL."""
         from llmb_run.archive import build_archive_file_list
 
         llmb_install = tmp_path / "install"
@@ -269,7 +269,7 @@ class TestArchiveCli:
     def test_archive_command_help_shows_versioned_default(self, runner):
         from llmb_run.main import app
 
-        result = runner.invoke(app, ["archive", "--help"], terminal_width=140)
+        result = runner.invoke(app, ["archive", "--help"], env={"COLUMNS": "140"})
 
         assert result.exit_code == 0, f"Exit code: {result.exit_code}, Output: {result.stdout}"
         assert "llmb-archive_<release_version>_<timestamp>.tar.zst" in result.stdout

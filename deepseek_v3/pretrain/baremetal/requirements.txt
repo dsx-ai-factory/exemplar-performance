@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Python packages for the DeepSeek V3 bare-metal benchmark, installed by install.sh
+# after PyTorch, Transformer Engine, and Megatron Core. Versions match the training
+# environment in the nvcr.io/nvidia/nemo:26.08.01 image and satisfy the ranges
+# declared by the pinned Megatron-Bridge commit.
+datasets==4.8.5
+# Imported by the Megatron-Bridge training entry point even for text-only pre-training.
+diffusers==0.39.0
+megatron-energon==7.4.0
+nvidia-modelopt==0.46.0
+einops==0.8.2
+huggingface_hub==1.31.0
+hydra-core==1.3.7
+# nemo-run 0.11.1 imports leptonai.api.v1, which newer leptonai releases removed.
+leptonai==0.27.3
+nemo-run==0.11.1
+numpy==2.1.0
+nvidia-ml-py==13.610.43
+nvidia-resiliency-ext==0.6.0
+omegaconf==2.3.1
+packaging==26.3
+pyyaml==6.0.3
+regex==2026.9.10
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.2
+six==1.17.0
+tensorboard==2.21.0
+tiktoken==0.14.0
+tokenizers==0.22.2
+tqdm==4.70.1
+transformers==5.12.1
+typing_extensions==4.16.0
+wandb==0.29.0

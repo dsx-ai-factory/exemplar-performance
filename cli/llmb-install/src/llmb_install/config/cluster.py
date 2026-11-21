@@ -111,7 +111,7 @@ def create_cluster_config(
         venv_type: Type of virtual environment used ('venv' or 'conda')
         workload_venvs: Dictionary mapping workload keys to their venv paths
         node_architecture: Node architecture (e.g., 'x86_64', 'arm64')
-        image_download_method: Where image/dataset downloads run for Slurm installs:
+        image_download_method: Where container image downloads run for Slurm installs:
             'local' = on the current node, 'slurm' = submitted to a Slurm CPU partition.
             Not applicable for Kubernetes installs (downloads are skipped entirely).
         image_folder: Optional path to container image folder

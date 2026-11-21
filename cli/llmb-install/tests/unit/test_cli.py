@@ -12,6 +12,12 @@ from llmb_install.cli import main
 from llmb_install.constants import EXIT_ERROR
 
 
+@pytest.fixture(autouse=True)
+def skip_native_allocator_setup(monkeypatch):
+    # Tests of CLI error handling must never change pytest's own allocator.
+    monkeypatch.setattr("llmb_install.utils.memory.configure_allocator", lambda: False)
+
+
 def test_main_keyboard_interrupt_exits_130(monkeypatch, capsys):
     """Ctrl-C should surface as exit code 130 for wrapper scripts."""
 

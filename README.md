@@ -315,6 +315,12 @@ The following tables list the available benchmarks and their configurations.
 
 **Note:** The "Scale (# of GPUs)" column indicates the minimum supported scale and the maximum scale tested for each workload. The recipes may function at larger scales unless otherwise noted in the workload-specific README, although they have not been explicitly validated beyond the listed maximum.
 
+### VR NVL72 Workloads
+
+|   Type   |    Framework    |                             Model                             | Container Version | Model Size | Scale (# of GPUs) |    Precision     | Model Access Required | Checkpointing | Cluster Type |
+| :------: | :-------------: | :-----------------------------------------------------------: | :---------------: | :--------: | :---------------: | :--------------: | :-------------------: | :-----------: | :----------: |
+| Pretrain | Megatron-Bridge | [DeepSeek V3](deepseek_v3/pretrain/megatron_bridge/README.md) |     26.10.01      |    671B    |      128-512      | NVFP4, FP8, BF16 |          Yes          |      No       |    Slurm     |
+
 ### GB300 Workloads
 
 |      Type      |    Framework    |                                                    Model                                                     |  Container Version  | Model Size | Scale (# of GPUs) |    Precision     | Model Access Required | Checkpointing |   Cluster Type    |

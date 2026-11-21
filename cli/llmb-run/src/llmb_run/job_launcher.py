@@ -672,17 +672,31 @@ class SrtSlurmLauncher(JobLauncher):
         return config
 
     @staticmethod
-    def _artifact_aliases(metadata: dict, llmb_install: Path, llmb_workload: Path) -> tuple[dict, dict]:
-        """Resolve LLMB-provisioned model and container aliases for SRT-Slurm."""
+    def _artifact_aliases(
+        metadata: dict, llmb_install: Path, llmb_workload: Path, gpu_type: str | None = None
+    ) -> tuple[dict, dict]:
+        """Resolve LLMB-provisioned model and container aliases for SRT-Slurm.
+
+        A ``target: workload`` download lives in the workload directory; a ``target: shared`` one in
+        ``$LLMB_INSTALL/datasets``, where several workloads reuse one copy. Downloads whose ``when.gpu``
+        excludes this GPU type were not provisioned and are skipped.
+        """
         model_paths: dict[str, str] = {}
         repositories = metadata.get("downloads", {}).get("huggingface", {}).get("repos", []) or []
         for repository in repositories:
-            if not isinstance(repository, dict) or repository.get("target") != "workload":
+            if not isinstance(repository, dict):
+                continue
+            target = repository.get("target")
+            if target not in ("workload", "shared"):
+                continue
+            when = repository.get("when")
+            when_gpus = when.get("gpu") if isinstance(when, dict) else None
+            if gpu_type and isinstance(when_gpus, list) and gpu_type not in when_gpus:
                 continue
             alias = repository.get("name")
             if not isinstance(alias, str) or not alias:
                 raise ValueError("SRT-Slurm Hugging Face downloads must declare a non-empty 'name' alias.")
-            path = llmb_workload / alias
+            path = llmb_workload / alias if target == "workload" else llmb_install / "datasets" / alias
             if not path.exists():
                 raise ValueError(f"SRT-Slurm model alias '{alias}' does not exist: {path}")
             model_paths[alias] = str(path)
@@ -703,7 +717,7 @@ class SrtSlurmLauncher(JobLauncher):
             containers[alias] = str(path)
 
         if not model_paths:
-            raise ValueError("SRT-Slurm workload metadata declares no workload-local model aliases.")
+            raise ValueError("SRT-Slurm workload metadata declares no model aliases.")
         if not containers:
             raise ValueError("SRT-Slurm workload metadata declares no container aliases.")
         return model_paths, containers
@@ -729,7 +743,9 @@ class SrtSlurmLauncher(JobLauncher):
         else:
             gpus_per_node = self.get_gpus_per_node(self.get_gpu_type())
 
-        model_paths, containers = self._artifact_aliases(metadata, Path(self.config.llmb_install), llmb_workload)
+        model_paths, containers = self._artifact_aliases(
+            metadata, Path(self.config.llmb_install), llmb_workload, self.get_gpu_type()
+        )
         config_path = srt_root / "srtslurm.yaml"
         lock_path = srt_root / ".srtslurm.yaml.lock"
         with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -811,6 +827,15 @@ class SrtSlurmLauncher(JobLauncher):
         if not isinstance(resources, dict):
             raise ValueError(f"SRT-Slurm recipe has no valid 'resources' mapping: {recipe_path}")
         resources = dict(resources)
+        # Schema v2 declares each engine role's node count under `roles` instead of `*_nodes` resources.
+        roles = recipe.get("roles")
+        if roles is not None and not isinstance(roles, dict):
+            raise ValueError(f"SRT-Slurm recipe 'roles' must be a mapping: {recipe_path}")
+        roles = dict(roles or {})
+        for name, role in roles.items():
+            if not isinstance(role, dict):
+                raise ValueError(f"SRT-Slurm recipe role '{name}' must be a mapping: {recipe_path}")
+            roles[name] = dict(role)
 
         # SRT selectors are overlays on base. Account for any resource values
         # changed by the selected overlay before validating LLMB --scale.
@@ -825,15 +850,30 @@ class SrtSlurmLauncher(JobLauncher):
                 if not isinstance(overlay_resources, dict):
                     raise ValueError(f"SRT-Slurm recipe selector '{selector}.resources' must be a mapping.")
                 resources.update(overlay_resources)
+            overlay_roles = overlay.get("roles")
+            if overlay_roles is not None:
+                if not isinstance(overlay_roles, dict):
+                    raise ValueError(f"SRT-Slurm recipe selector '{selector}.roles' must be a mapping.")
+                for name, role in overlay_roles.items():
+                    if not isinstance(role, dict):
+                        raise ValueError(f"SRT-Slurm recipe selector '{selector}.roles.{name}' must be a mapping.")
+                    roles.setdefault(name, {}).update(role)
 
-        def positive_int(name: str) -> int:
-            value = resources.get(name)
+        def positive_int(name: str, values: dict = resources, what: str = "") -> int:
+            value = values.get(name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"SRT-Slurm recipe resource '{name}' must be a positive integer in {recipe_path}.")
+                what = what or f"resource '{name}' must be a positive integer"
+                raise ValueError(f"SRT-Slurm recipe {what} in {recipe_path}.")
             return value
 
         gpus_per_node = positive_int("gpus_per_node")
-        if any(name in resources for name in ("prefill_nodes", "decode_nodes", "agg_nodes")):
+        if roles:
+            # A role's `gpus` is per worker; Slurm allocates its `nodes` whole.
+            nodes = sum(
+                positive_int("nodes", role, f"role '{name}' must declare a positive integer 'nodes'")
+                for name, role in roles.items()
+            )
+        elif any(name in resources for name in ("prefill_nodes", "decode_nodes", "agg_nodes")):
             nodes = sum(
                 positive_int(name) for name in ("prefill_nodes", "decode_nodes", "agg_nodes") if name in resources
             )
@@ -1202,25 +1242,60 @@ class NVCreLauncher(JobLauncher):
     the cluster config's ``kubernetes:`` block) instead of SLURM env vars.
     The launch.sh detects CLUSTER_TYPE and calls setup_experiment.py with
     --nvcre_* flags rather than --account/--partition.
+
+    Workloads whose Slurm launcher is a plain batch script (``sbatch`` or
+    ``configured_sbatch``, e.g. the microbenchmarks) submit their own
+    WorkloadRun from launch.sh. They get an experiment directory in
+    LLMB_EXPERIMENT_DIR, as under ConfiguredSbatchLauncher, and need no venv
+    when their metadata does not ask for one.
     """
+
+    SCRIPT_LAUNCHER_TYPES = ('sbatch', 'configured_sbatch')
 
     def launch(self, task) -> SlurmJob:
         workload_config = self.config.workload_config(task.workload_key)
         venv_path = workload_config.get('venv_path')
         venv_type = workload_config.get('venv_type')
+        metadata_launcher_type = (
+            self.workloads[task.workload_key].get('metadata', {}).get('run', {}).get('launcher_type')
+        )
+        script_launcher = metadata_launcher_type in self.SCRIPT_LAUNCHER_TYPES
 
-        if not venv_path:
+        if venv_path:
+            if not venv_type:
+                logger.error(f"venv_type not found in config for workload {task.workload_key}")
+                return SlurmJob(job_id=None, job_workdir=None)
+            # Same venv activation as Nemo2Launcher: setup_experiment.py runs on the
+            # launch node from the workload's venv (created by the standard install
+            # flow), so launch.sh's plain `python3` resolves inside it.
+            env = get_venv_environment(venv_path, venv_type)
+        elif script_launcher:
+            env = os.environ.copy()
+        else:
             logger.error(f"venv_path not found in config for workload {task.workload_key}")
             return SlurmJob(job_id=None, job_workdir=None)
 
-        if not venv_type:
-            logger.error(f"venv_type not found in config for workload {task.workload_key}")
-            return SlurmJob(job_id=None, job_workdir=None)
-
-        # Same venv activation as Nemo2Launcher: setup_experiment.py runs on the
-        # launch node from the workload's venv (created by the standard install
-        # flow), so launch.sh's plain `python3` resolves inside it.
-        env = get_venv_environment(venv_path, venv_type)
+        if script_launcher:
+            llmb_workload = f"{self.config.llmb_install}/workloads/{task.workload_key}"
+            try:
+                experiment_dir = create_experiment_directory(
+                    workload_dir=llmb_workload,
+                    workload_key=task.workload_key,
+                    model_size=task.model_size,
+                    dtype=task.dtype,
+                    scale=task.scale,
+                )
+            except RuntimeError as e:
+                logger.error(format_task_output(task, prefix="ERROR: ", suffix=str(e)))
+                return SlurmJob(job_id=None, job_workdir=None)
+            gpu_type = self.get_gpu_type()
+            gpus_per_node = self.get_gpus_per_node(gpu_type)
+            env['LLMB_REPO'] = self.config.llmb_repo
+            env['LLMB_WORKLOAD'] = llmb_workload
+            env['LLMB_RECIPE_ROOT'] = self.workloads[task.workload_key]['dir']
+            env['LLMB_EXPERIMENT_DIR'] = experiment_dir
+            env['GPUS_PER_NODE'] = str(gpus_per_node)
+            env['NVL_DOMAIN'] = str(self.get_nvl_domain(gpu_type, gpus_per_node))
 
         # Standard job env vars (same as other launchers)
         env['LLMB_INSTALL'] = self.config.llmb_install
@@ -1228,6 +1303,7 @@ class NVCreLauncher(JobLauncher):
         env['DTYPE'] = task.dtype
         env['JOB_TOTAL_GPUS'] = str(task.scale)
         env['GPU_TYPE'] = self.get_gpu_type()
+        env['MBRIDGE_GPU_TYPE'] = self.get_mbridge_gpu_type(self.get_gpu_type())
 
         # launch.sh reads these to apply the profiling and reduced-size proxy overrides, as on Slurm.
         if task.profile:

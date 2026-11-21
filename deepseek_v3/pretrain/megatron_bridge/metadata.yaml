@@ -14,6 +14,8 @@ container:
     by_gpu:
       default:
         - 'nvcr.io#nvidia/nemo:26.08.01'
+      vr:
+        - 'nvcr.io#nvidia/nemo:26.10.01'
       h100:
         - 'nvcr.io#nvidia/nemo:26.06.01'
 
@@ -31,6 +33,13 @@ repositories:
       nemo_run:
         url: "https://github.com/NVIDIA-NeMo/Run.git"
         commit: "6a55313352bf7204a01636ea9a59dd61289da253"
+    vr:
+      megatron_bridge:
+        url: "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
+        commit: "7139acb93831a2f2e9ce1df8f7bd7ca1d18e6787"
+      nemo_run:
+        url: "https://github.com/NVIDIA-NeMo/Run.git"
+        commit: "211d4b7439c1b5ee401cfbaba1765454ed438ff5"
     h100:
       megatron_bridge:
         url: "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git"
@@ -67,9 +76,22 @@ run:
   execution_targets:
     by_gpu:
       default: [slurm, kubernetes]
+      vr: [slurm]  # VR pins pre-nvcre Megatron-Bridge and nemo-run commits.
       h100: [slurm]  # H100 pins pre-nvcre Megatron-Bridge and nemo-run commits.
 
   gpu_configs:
+    vr:
+      model_configs:
+        - model_size: '671b'
+          dtypes:
+            bf16:
+              scales: [128, 256, 512]
+            fp8:
+              scales: [128, 256, 512]
+              proxy_scales: [4, 8, 16, 32, 64, 72, 144, 216, 288, 432, 504, 576]
+            nvfp4:
+              scales: [128, 256, 512]
+
     gb300:
       model_configs:
         - model_size: '671b'

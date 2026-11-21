@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmb-install"
-version = "1.19.0.post1"
+version = "1.22.0"
 requires-python = ">=3.11"
 description = "Installer for LLM benchmarking workloads"
 
@@ -18,8 +18,10 @@ dependencies = [
     "rich>=13.8,<16",
     "transformers>4.57.3,<6",
     "huggingface-hub>=1.0.0,<2",
-    # >=1.3.0: first hf-xet with HF_XET_FIXED_DOWNLOAD_CONCURRENCY (download memory cap).
-    "hf-xet>=1.3.0,<2",
+    # Pin to the version used for the download-memory measurements. Before upgrading,
+    # re-test cgroup-limited hosts and hosts with a small RLIMIT_AS/RLIMIT_DATA; see
+    # _get_download_settings() for the remaining upstream workaround.
+    "hf-xet==1.8.0",
 ]
 
 [project.scripts]

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the exemplar certification command."""
@@ -126,6 +126,30 @@ def mock_exemplar_dependencies(mock_exemplar_cluster_config, mock_exemplar_workl
 @pytest.mark.usefixtures("mock_exemplar_dependencies")
 class TestExemplarCommand:
     """Tests for the exemplar certification command."""
+
+    @pytest.mark.parametrize('internal', [False, True])
+    def test_exemplar_dump_env_default(self, runner, mock_exemplar_cluster_config, mock_exemplar_workloads, internal):
+        from llmb_run.main import app
+
+        mock_exemplar_workloads['pretrain_workload_a']['metadata']['run']['launcher_type'] = 'megatron_bridge'
+        write_exemplar_yaml(
+            Path(mock_exemplar_cluster_config['launcher']['llmb_repo']),
+            {
+                'config': {'scale': 512, 'repeats': 2, 'profile': True},
+                'workloads': {'h100': [{'pretrain_workload_a_7b': {'dtypes': ['fp8']}}]},
+            },
+        )
+        with (
+            patch('llmb_run.main._internal_extensions_available', return_value=internal),
+            patch('llmb_run.main.run_tests') as launch,
+        ):
+            result = runner.invoke(app, ['exemplar'])
+
+        assert result.exit_code == 0, result.output
+        tasks = launch.call_args.args[1]
+        assert len(tasks) == 2
+        assert [task.profile for task in tasks] == [False, True]
+        assert all(task.extra_workload_args == (('--dump_env',) if internal else ()) for task in tasks)
 
     def test_exemplar_missing_yaml_exits_with_path(self, runner, caplog, mock_exemplar_cluster_config):
         """Test missing exemplar.yaml -> exit 1 with expected path."""

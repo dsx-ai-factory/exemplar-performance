@@ -206,7 +206,7 @@ def fetch_container_images(
                     print(f"Error: Failed to download {source_sqsh_file}: {str(e)}\n")
                     if image_download_method == 'slurm':
                         print(
-                            "Please ensure the compute nodes you selected in the 'CPU_PARTITION' option are configured correctly, or try a local installation (if available)."
+                            "Please ensure the compute nodes you selected in the 'CPU_PARTITION' option are configured correctly, or try the local image download method (if available)."
                         )
                         # Check if running from a virtual environment
                         if detect_virtual_environment():
@@ -219,7 +219,7 @@ def fetch_container_images(
                             )
                             print("If using conda, please try venv instead with system python.")
                     else:
-                        print("Ensure your system has appropriate resources or try a SLURM-based installation.")
+                        print("Ensure your system has appropriate resources or try the SLURM image download method.")
                     raise SystemExit(1) from e
 
             # If using a shared directory, create/update symlink in the local install

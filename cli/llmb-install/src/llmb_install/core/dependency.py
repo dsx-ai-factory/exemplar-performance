@@ -8,14 +8,20 @@ This module provides functions for resolving workload dependencies, grouping wor
 by their dependencies, and installing shared dependencies into virtual environments.
 """
 
+import codecs
 import copy
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
 from typing import Any, Dict, List, Optional
+
+from rich import get_console
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 from llmb_install.utils.logging import get_logger
 
@@ -452,6 +458,89 @@ def _cleanup_invalid_git_repo(
             logger.warning(f"Failed to remove invalid {description} directory {repo_path}: {e}")
 
 
+def _interactive_output() -> bool:
+    """True when rich renders a live display; otherwise the transient bar prints nothing."""
+    return get_console().is_terminal
+
+
+def _print_when_not_interactive(message: str) -> None:
+    """Print a status line only where no live bar is showing the same thing already."""
+    if not _interactive_output():
+        print(message)
+
+
+# Shape of a git progress line, independent of phase name, git version and locale:
+# 'Receiving objects:  42% (51832/123410), 84.50 MiB | 12.34 MiB/s', 'Enumerating objects: 420, done.',
+# 'Enumerating objects: 12345'. Server-side phases arrive prefixed with 'remote:'.
+_GIT_PROGRESS_RE = re.compile(r'(?:remote:\s*)?([^:]+:\s+\d+(?:%.*|, done\.)?)')
+
+
+def _extract_git_progress_status(line: str) -> str | None:
+    """Return a cleaned status string if a git stderr line is a progress update."""
+    match = _GIT_PROGRESS_RE.fullmatch(line.strip())
+    return match[1] if match else None
+
+
+def _iter_stream_lines(stream: io.BufferedReader) -> Iterator[str]:
+    """Yield lines from a byte stream as they arrive, splitting on '\\r' as well as '\\n'.
+
+    Not text=True: universal newlines holds back a trailing '\\r' until the next byte,
+    so each git progress update would only show once the following one arrived.
+    """
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    buf = ''
+    for chunk in iter(lambda: stream.read1(4096), b''):
+        *lines, buf = re.split(r'[\r\n]+', buf + decoder.decode(chunk))
+        yield from lines
+    yield buf + decoder.decode(b'', final=True)
+
+
+def _run_git_with_progress(args: list[str], description: str, cwd: str | None = None) -> None:
+    """Run a git subcommand, rendering its progress on a terminal.
+
+    stderr is read as a stream: progress phases drive the bar and are dropped, all
+    other lines are kept for CalledProcessError. No timeout by design — duration
+    follows repo size and link speed, so a deadline is just an arbitrary failure
+    point; elapsed time is shown so the user can cancel instead.
+    """
+    cmd = ['git', *args]
+    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    stderr_lines: list[str] = []
+
+    with (
+        Progress(
+            TextColumn("  {task.description}"),
+            BarColumn(bar_width=20),
+            TimeElapsedColumn(),
+            TextColumn("{task.fields[status]}"),
+            transient=True,
+            disable=not _interactive_output(),  # a transient bar still emits a blank line on non-terminals
+        ) as progress,
+        subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=git_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        ) as proc,
+    ):
+        task = progress.add_task(description, total=None, status="")
+        assert proc.stderr is not None
+        try:
+            for line in _iter_stream_lines(proc.stderr):
+                if status := _extract_git_progress_status(line):
+                    progress.update(task, status=status)
+                elif line := line.strip():
+                    stderr_lines.append(line)
+        except BaseException:
+            proc.kill()
+            raise
+        returncode = proc.wait()
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd, stderr='\n'.join(stderr_lines))
+
+
 def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target_dir: str, commit: str) -> str:
     """Clone repository to cache if needed, then clone from cache to target directory.
 
@@ -478,43 +567,27 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
     # Validate and clean up cache if it exists but is invalid
     _cleanup_invalid_git_repo(cache_path, is_bare=True, description="cache repository")
 
-    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
-
     # Ensure repo is in cache
     if not os.path.exists(cache_path):
-        logger.debug(f"Creating mirror of {repo_url} in cache")
         print(f"  Cloning {name} from {repo_url} (this may take a few minutes)...")
         os.makedirs(cache_dir, exist_ok=True)
         try:
-            subprocess.run(
-                ['git', 'clone', '--mirror', repo_url, cache_path],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=git_env,
-            )
+            _run_git_with_progress(['clone', '--mirror', '--progress', repo_url, cache_path], f"Downloading {name}")
         except subprocess.CalledProcessError as e:
             e.add_note(f"Failed to cache {repo_url}")
             raise
     else:
-        logger.debug(f"Using cached repository for {name}")
+        _print_when_not_interactive(f"  Using cached {name}")
 
         # Check if required commit exists in cache, fetch if not
         if not _commit_exists_in_repo(cache_path, commit):
             logger.debug(f"Commit {commit} not in cache, fetching updates for {name}")
+            _print_when_not_interactive(f"  Fetching {name} from {repo_url}...")
             try:
-                subprocess.run(
-                    ['git', 'fetch', 'origin'],
-                    cwd=cache_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=git_env,
-                )
+                _run_git_with_progress(['fetch', '--progress', 'origin'], f"Downloading {name}", cwd=cache_path)
             except subprocess.CalledProcessError as e:
                 e.add_note(f"Failed to update cache for {name} for required commit {commit}")
                 raise
-
             # Verify commit exists after fetch
             if not _commit_exists_in_repo(cache_path, commit):
                 logger.error(
@@ -555,14 +628,8 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
 
                 # Fetch from origin to set up remote-tracking branches and establish credentials
                 # This is needed for git-lfs to work correctly with authentication
-                subprocess.run(
-                    ['git', 'fetch', 'origin'],
-                    cwd=target_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env=git_env,
-                )
+                _print_when_not_interactive(f"  Fetching {name} from {repo_url}...")
+                _run_git_with_progress(['fetch', '--progress', 'origin'], f"Downloading {name}", cwd=target_path)
 
                 # Update default branch tracking to use origin instead of cache
                 # Critical: branch.*.remote determines which remote git-lfs uses for authentication
@@ -589,7 +656,7 @@ def _clone_or_get_from_cache(name: str, repo_url: str, install_path: str, target
         if not _commit_exists_in_repo(target_path, commit):
             # Commit missing, need to fetch from cache
             try:
-                subprocess.run(['git', 'fetch', 'cache'], cwd=target_path, check=True, capture_output=True, text=True)
+                _run_git_with_progress(['fetch', '--progress', 'cache'], f"Updating {name} from cache", cwd=target_path)
             except subprocess.CalledProcessError as e:
                 e.add_note(f"Failed to fetch cache updates for {name} for required commit {commit}")
                 raise
@@ -647,55 +714,41 @@ def clone_git_repos(git_deps: Dict[str, Any], target_dir: str, install_path: str
             # Direct cloning without cache
             repo_name = _derive_repo_name_from_url(repo_url)
             clone_path = os.path.join(target_dir, repo_name)
-            print(f"  Cloning {name}...")
+            print(f"  Cloning {name} from {repo_url} (this may take a few minutes)...")
 
             # Validate and clean up existing repository if it's invalid
             _cleanup_invalid_git_repo(clone_path, is_bare=False, description="repository")
 
             if not os.path.exists(clone_path):
                 try:
-                    subprocess.run(
-                        ['git', 'clone', '--no-checkout', repo_url, clone_path],
-                        check=True,
-                        capture_output=True,
-                        text=True,
+                    _run_git_with_progress(
+                        ['clone', '--no-checkout', '--progress', repo_url, clone_path], f"Downloading {name}"
                     )
                 except subprocess.CalledProcessError as e:
                     e.add_note(f"Failed to clone {repo_url}")
                     raise
             else:
+                _print_when_not_interactive(f"  Fetching {name} from {repo_url}...")
                 try:
-                    subprocess.run(
-                        ['git', 'fetch', 'origin'],
-                        cwd=clone_path,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
+                    _run_git_with_progress(['fetch', '--progress', 'origin'], f"Downloading {name}", cwd=clone_path)
                 except subprocess.CalledProcessError as e:
                     e.add_note(f"Failed to fetch {repo_url}")
                     raise
-
         # Checkout the specific commit
-        logger.debug(f"Checking out commit {commit} for {name}")
         try:
-            subprocess.run(
-                ['git', 'checkout', '-f', commit], cwd=clone_path, check=True, capture_output=True, text=True
-            )
+            _run_git_with_progress(['checkout', '-f', '--progress', commit], f"Checking out {name}", cwd=clone_path)
         except subprocess.CalledProcessError as e:
             e.add_note(f"Failed to checkout commit {commit} in {clone_path}")
             raise
 
         # Update submodules if specified
         if repo_info.get('submodules', False):
-            logger.debug(f"Checking out submodules for {name}")
+            _print_when_not_interactive(f"  Fetching submodules for {name}...")
             try:
-                subprocess.run(
-                    ['git', 'submodule', 'update', '--init', '--recursive'],
+                _run_git_with_progress(
+                    ['submodule', 'update', '--init', '--recursive', '--progress'],
+                    f"Downloading {name} submodules",
                     cwd=clone_path,
-                    check=True,
-                    capture_output=True,
-                    text=True,
                 )
             except subprocess.CalledProcessError as e:
                 e.add_note(f"Failed to checkout submodules for {name}")

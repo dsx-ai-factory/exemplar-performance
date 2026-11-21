@@ -6,8 +6,7 @@ Note: Bulk mode is now accessed via `llmb-run submit -f <file>`.
 
 **Required format:** `workload_key_modelsize:`
 
-The header must include both the workload name and model size, separated by an underscore.
-The model size must end with `b` (billions of parameters) or `t` (trillions of parameters).
+The header must include both the workload name and model size, separated by an underscore. The model size must end with `b` (billions of parameters) or `t` (trillions of parameters).
 
 ### Valid Examples
 
@@ -156,7 +155,7 @@ pretrain_qwen3_235b:
 
 ## Text Format Examples (Legacy)
 
-The text format uses a Python-tuple-like syntax:
+The text format uses a Python-tuple-like syntax:\
 `workload_modelsize: (dtype, [scales], repeats)`
 
 **Important**: Inline trailing comments on task lines are **not supported**. Put comments on their own lines instead.
